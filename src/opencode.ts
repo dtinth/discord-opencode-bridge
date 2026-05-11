@@ -34,10 +34,31 @@ async function post<T>(cfg: ChannelConfig, path: string, body: unknown): Promise
   return { data };
 }
 
-export async function createSession(cfg: ChannelConfig, title: string): Promise<string> {
-  const result = await post<{ id: string }>(cfg, "/session", { title });
+export async function createSession(cfg: ChannelConfig, title?: string): Promise<string> {
+  const result = await post<{ id: string }>(cfg, "/session", title ? { title } : {});
   if ("error" in result) throw new Error(`Failed to create session: ${result.error.message}`);
   return result.data.id;
+}
+
+export async function respondToPermission(
+  cfg: ChannelConfig,
+  sessionId: string,
+  permissionId: string,
+  response: "once" | "always" | "reject",
+): Promise<void> {
+  const url = new URL(
+    `/session/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(permissionId)}`,
+    cfg.serverUrl,
+  ).href;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: headers(cfg),
+    body: JSON.stringify({ response }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Failed to respond to permission: ${text || res.statusText}`);
+  }
 }
 
 export async function promptAsync(
@@ -58,6 +79,7 @@ export async function promptAsync(
 }
 
 export interface Part {
+  id?: string;
   type?: string;
   text?: string;
   time?: { end?: string };
@@ -70,11 +92,12 @@ export interface OpenCodeEvent {
   sessionID?: string;
   properties?: {
     sessionID?: string;
-    requestID?: string;
+    id?: string;
     description?: string;
     options?: Array<{ label: string; value: string }>;
     error?: { message?: string };
     part?: Part;
+    info?: { title?: string | null };
   };
   part?: Part;
 }

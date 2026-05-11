@@ -5,6 +5,8 @@ import {
   ChannelType,
   ThreadAutoArchiveDuration,
   type Message,
+  type ButtonInteraction,
+  type StringSelectMenuInteraction,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
@@ -17,9 +19,11 @@ import { log } from "./debug";
 import {
   createSession,
   promptAsync,
+  respondToPermission,
   subscribe,
   type ChannelConfig,
   type OpenCodeEvent,
+  type Part,
 } from "./opencode";
 
 function startEventListener(
@@ -54,6 +58,9 @@ function startEventListener(
   };
   run();
 }
+
+const threadUsers = new Map<string, string>();
+const announcedToolParts = new Set<string>();
 
 export async function startBot() {
   const { db } = createDb(envConfig.databasePath);
@@ -97,6 +104,83 @@ export async function startBot() {
       client.destroy();
       process.exit(0);
     });
+  });
+
+  client.on(Events.InteractionCreate, async (interaction) => {
+    if (!interaction.isButton() && !interaction.isStringSelectMenu()) return;
+    if (!interaction.inCachedGuild()) return;
+
+    const customId = interaction.customId;
+    log.debug("interaction", interaction.user.id, customId);
+
+    // Look up session and config from the thread/channel
+    const ts = await db
+      .select()
+      .from(schema.threadSessions)
+      .where(eq(schema.threadSessions.threadId, interaction.channelId))
+      .get();
+    if (!ts) {
+      log.debug("interaction: no session for channel", interaction.channelId);
+      await interaction.reply({ content: "No active session in this channel.", ephemeral: true });
+      return;
+    }
+
+    if (threadUsers.get(interaction.channelId) !== interaction.user.id) {
+      log.debug(
+        "interaction: user",
+        interaction.user.id,
+        "not authorized for thread",
+        interaction.channelId,
+      );
+      await interaction.reply({
+        content: "Only the user who mentioned the bot can respond.",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const cfgRaw = await db
+      .select()
+      .from(schema.channelConfigs)
+      .where(eq(schema.channelConfigs.channelId, ts.channelId))
+      .get();
+    if (!cfgRaw) {
+      log.debug("interaction: no channel config for", ts.channelId);
+      await interaction.reply({ content: "Channel config not found.", ephemeral: true });
+      return;
+    }
+    const cfg: ChannelConfig = cfgRaw;
+
+    await interaction.deferUpdate();
+
+    if (interaction.isButton() && customId.startsWith("perm_")) {
+      const parts = customId.split("_");
+      const permissionId = parts[1]!;
+      const action = parts[2]!;
+      try {
+        await respondToPermission(
+          cfg,
+          ts.sessionId,
+          permissionId,
+          action === "approve" ? "once" : "reject",
+        );
+        log.debug("permission response sent", permissionId, action);
+      } catch (err) {
+        log.error("permission response failed", err);
+      }
+    }
+
+    if (interaction.isStringSelectMenu() && customId.startsWith("q_")) {
+      const value = interaction.values[0];
+      if (value) {
+        try {
+          await promptAsync(cfg, ts.sessionId, value);
+          log.debug("question response sent", value);
+        } catch (err) {
+          log.error("question response failed", err);
+        }
+      }
+    }
   });
 
   client.on(Events.MessageCreate, async (msg) => {
@@ -159,6 +243,38 @@ function isBotMentioned(msg: Message, client: Client): boolean {
   return msg.mentions.has(client.user!.id);
 }
 
+function formatSystemPreamble(client: Client, threadId: string): string {
+  return `<discord-harness>
+System message: This session is bridged from Discord.
+The bot's user ID is <@${client.user!.id}>.
+You are in Discord thread ID ${threadId}.
+When you receive new messages, pay attention to the message that mentioned you first, then use the earlier messages as supporting context.
+</discord-harness>`;
+}
+
+function formatUserMessages(messages: Message[]): string {
+  const lines = messages.map((m) => {
+    const attachments = [...m.attachments.values()].map((a) => ({
+      url: a.url,
+      name: a.name,
+      contentType: a.contentType,
+    }));
+    return JSON.stringify({
+      user: { id: m.author.id, displayName: m.author.displayName },
+      content: m.content,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    });
+  });
+  return `<discord-harness>
+New messages from Discord:
+${lines.join("\n")}
+</discord-harness>`;
+}
+
+function buildInitialPrompt(client: Client, threadId: string, messages: Message[]): string {
+  return `${formatSystemPreamble(client, threadId)}\n${formatUserMessages(messages)}`;
+}
+
 async function handleChannelMention(db: Db, client: Client, msg: Message, cfg: ChannelConfig) {
   log.debug("creating thread");
   const thread = await msg.startThread({
@@ -166,9 +282,10 @@ async function handleChannelMention(db: Db, client: Client, msg: Message, cfg: C
     autoArchiveDuration: ThreadAutoArchiveDuration.OneHour,
   });
   log.debug("thread created", thread.id);
+  threadUsers.set(thread.id, msg.author.id);
 
   log.debug("creating session");
-  const sessionId = await createSession(cfg, thread.name);
+  const sessionId = await createSession(cfg);
   log.debug("session created", sessionId);
 
   await db.insert(schema.threadSessions).values({
@@ -180,7 +297,7 @@ async function handleChannelMention(db: Db, client: Client, msg: Message, cfg: C
   log.debug("mapping stored", thread.id, "->", sessionId);
 
   log.debug("sending prompt_async");
-  await promptAsync(cfg, sessionId, msg.content);
+  await promptAsync(cfg, sessionId, buildInitialPrompt(client, thread.id, [msg]));
   log.debug("prompt_async sent");
 }
 
@@ -190,7 +307,19 @@ async function handleThreadMentionNewSession(
   msg: Message,
   cfg: ChannelConfig,
 ) {
-  const sessionId = await createSession(cfg, `Session from thread ${msg.channelId}`);
+  log.debug("fetching recent messages for context");
+  const messages = await msg.channel.messages.fetch({ limit: 100 });
+  const collected: Message[] = [];
+  for (const m of messages.values()) {
+    if (m.author.bot) continue;
+    if (m.id === msg.id) break;
+    collected.push(m);
+  }
+  collected.reverse();
+  collected.push(msg);
+  threadUsers.set(msg.channelId, msg.author.id);
+
+  const sessionId = await createSession(cfg);
 
   await db.insert(schema.threadSessions).values({
     threadId: msg.channelId,
@@ -199,7 +328,9 @@ async function handleThreadMentionNewSession(
     lastSentMessageId: msg.id,
   });
 
-  await promptAsync(cfg, sessionId, msg.content);
+  log.debug("sending prompt_async");
+  await promptAsync(cfg, sessionId, buildInitialPrompt(client, msg.channelId, collected));
+  log.debug("prompt_async sent");
 }
 
 async function handleThreadMessage(
@@ -209,6 +340,12 @@ async function handleThreadMessage(
   cfg: ChannelConfig,
   ts: typeof schema.threadSessions.$inferSelect,
 ) {
+  if (!isBotMentioned(msg, client)) {
+    log.debug("bot not mentioned, skipping");
+    return;
+  }
+  threadUsers.set(msg.channelId, msg.author.id);
+
   log.debug("fetching messages since cursor", ts.lastSentMessageId);
   const messages = await msg.channel.messages.fetch({ limit: 100 });
   const collected: Message[] = [];
@@ -224,7 +361,7 @@ async function handleThreadMessage(
   }
   log.debug("collected", collected.length, "messages");
 
-  const promptText = collected.map((m) => `[${m.author.displayName}] ${m.content}`).join("\n");
+  const promptText = formatUserMessages(collected);
 
   log.debug("sending prompt_async to session", ts.sessionId);
   await promptAsync(cfg, ts.sessionId, promptText);
@@ -240,15 +377,7 @@ function getSessionId(event: OpenCodeEvent): string | undefined {
   return event.sessionID ?? event.properties?.sessionID;
 }
 
-function getPart(event: OpenCodeEvent):
-  | {
-      type?: string;
-      text?: string;
-      time?: { end?: string };
-      name?: string;
-      state?: { status?: string; input?: Record<string, unknown> };
-    }
-  | undefined {
+function getPart(event: OpenCodeEvent): Part | undefined {
   return event.properties?.part ?? event.part;
 }
 
@@ -274,6 +403,11 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
   if (!channel?.isTextBased()) return;
   if (!channel.isSendable()) return;
 
+  const showTyping = () => {
+    if ("sendTyping" in channel)
+      (channel as { sendTyping: () => Promise<void> }).sendTyping().catch(() => {});
+  };
+
   switch (event.type) {
     case "message.part.updated": {
       const part = getPart(event);
@@ -281,21 +415,29 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
       if (part.type === "text" && part.time?.end) {
         const text = (part.text ?? "").trim();
         if (text) await channel.send(`⬥ ${text}`);
+      } else {
+        showTyping();
       }
       if (part.type === "tool" && part.state?.status === "running") {
+        if (part.id) {
+          const key = `${sessionId}-${part.id}`;
+          if (announcedToolParts.has(key)) break;
+          announcedToolParts.add(key);
+        }
         await channel.send(formatToolPart(part));
       }
       break;
     }
     case "permission.asked": {
+      showTyping();
       const props = event.properties;
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
-          .setCustomId(`perm_${props?.requestID}_approve`)
+          .setCustomId(`perm_${props?.id}_approve`)
           .setLabel("Approve")
           .setStyle(ButtonStyle.Success),
         new ButtonBuilder()
-          .setCustomId(`perm_${props?.requestID}_reject`)
+          .setCustomId(`perm_${props?.id}_reject`)
           .setLabel("Reject")
           .setStyle(ButtonStyle.Danger),
       );
@@ -306,11 +448,12 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
       break;
     }
     case "question.asked": {
+      showTyping();
       const props = event.properties;
       const opts = props?.options ?? [];
       if (opts.length === 0) break;
       const select = new StringSelectMenuBuilder()
-        .setCustomId(`q_${props?.requestID}`)
+        .setCustomId(`q_${props?.id}`)
         .setPlaceholder("Choose an option...")
         .addOptions(
           opts.map((opt) => ({
@@ -323,6 +466,16 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
         content: `❓ **Question**\n${props?.description ?? ""}`,
         components: [row],
       });
+      break;
+    }
+    case "session.updated": {
+      const title = event.properties?.info?.title;
+      if (typeof title === "string" && title && "setName" in channel) {
+        const ch = channel as { name: string; setName: (name: string) => Promise<unknown> };
+        if (ch.name !== title) {
+          ch.setName(title).catch((err) => log.warn("Failed to rename thread", err));
+        }
+      }
       break;
     }
     case "session.error": {
