@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { PermissionsBitField } from "discord.js";
 import { createDb, schema } from "./db";
 import { eq } from "drizzle-orm";
 import { config } from "./config";
@@ -46,5 +47,54 @@ program.command("list-channels").action(async () => {
     console.log(`${ch.channelId} → ${ch.serverUrl} ${ch.directory}`);
   }
 });
+
+program
+  .command("invite")
+  .description("Generate a Discord OAuth2 invite URL for the bot")
+  .action(() => {
+    const token = process.env.DISCORD_TOKEN;
+    if (!token) {
+      console.error("DISCORD_TOKEN environment variable is required");
+      process.exit(1);
+    }
+
+    let clientId: string | null = null;
+
+    // Try to extract client ID from old-format bot token
+    try {
+      const parts = token.split(".");
+      if (parts.length >= 2) {
+        const decoded = atob(parts[0]!);
+        if (/^\d+$/.test(decoded)) {
+          clientId = decoded;
+        }
+      }
+    } catch {
+      // Not a base64-decodable token (new format)
+    }
+
+    if (clientId) {
+      const permBit = new PermissionsBitField([
+        "ViewChannel",
+        "SendMessages",
+        "CreatePublicThreads",
+        "SendMessagesInThreads",
+        "ReadMessageHistory",
+        "EmbedLinks",
+        "AttachFiles",
+      ]).bitfield.toString();
+      const url = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&permissions=${permBit}&scope=bot`;
+      console.log(`Invite URL:\n${url}`);
+    } else {
+      console.log("Could not extract client ID from token (new-format token).");
+      console.log(
+        "Go to https://discord.com/developers/applications, find your bot, and copy the CLIENT ID.",
+      );
+      console.log("Then visit:");
+      console.log(
+        "https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=309237763072&scope=bot",
+      );
+    }
+  });
 
 export { program };
