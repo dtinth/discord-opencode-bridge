@@ -38,6 +38,16 @@ bun run src/index.ts list-channels
 bun run src/index.ts run
 ```
 
+## Debug logging
+
+```bash
+# Enable debug logs at startup
+DEBUG=bridge:* bun run src/index.ts run
+
+# Or toggle at runtime without restart — send SIGUSR1 to the process
+kill -USR1 <pid>
+```
+
 ## How it works
 
 - Messages mentioning the bot in a configured text channel create a new Discord thread and an OpenCode session.
