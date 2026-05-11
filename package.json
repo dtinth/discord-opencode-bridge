@@ -1,10 +1,11 @@
 {
   "name": "fresh-app",
-  "module": "index.ts",
-  "type": "module",
   "private": true,
+  "type": "module",
+  "module": "index.ts",
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "vite-plus": "^0.1.20"
   },
   "peerDependencies": {
     "typescript": "^5"
