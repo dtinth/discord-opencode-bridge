@@ -103,13 +103,21 @@ export async function startBot() {
     if (msg.author.bot) return;
     log.debug("message", msg.channelId, msg.channel.type, msg.author.id, msg.content.slice(0, 80));
 
+    // For thread messages, look up the config by parent channel ID
+    const isThread =
+      msg.channel.type === ChannelType.PublicThread ||
+      msg.channel.type === ChannelType.PrivateThread;
+    const configChannelId =
+      isThread && "parentId" in msg.channel && msg.channel.parentId
+        ? msg.channel.parentId
+        : msg.channelId;
     const cfgRaw = await db
       .select()
       .from(schema.channelConfigs)
-      .where(eq(schema.channelConfigs.channelId, msg.channelId))
+      .where(eq(schema.channelConfigs.channelId, configChannelId))
       .get();
     if (!cfgRaw) {
-      log.debug("no channel config for", msg.channelId);
+      log.debug("no channel config for", configChannelId, "(from msg", msg.channelId, ")");
       return;
     }
 
