@@ -13,6 +13,7 @@ import {
 import { createDb, schema, type Db } from "./db";
 import { eq } from "drizzle-orm";
 import { config as envConfig } from "./config";
+import { log } from "./debug";
 import {
   createSession,
   promptAsync,
@@ -30,18 +31,23 @@ function startEventListener(
     let backoff = 500;
     while (!signal.aborted) {
       try {
+        log.debug("SSE connecting", cfg.directory);
         const stream = subscribe(cfg, signal);
         backoff = 500;
+        log.debug("SSE connected", cfg.directory);
         for await (const event of stream) {
           if (signal.aborted) break;
+          log.debug("SSE event", event.type, event.sessionID);
           onEvent(event);
         }
+        log.debug("SSE stream ended", cfg.directory);
       } catch (err: unknown) {
         if (signal.aborted) return;
         const message = err instanceof Error ? err.message : String(err);
-        console.error(`SSE error for ${cfg.directory}:`, message);
+        log.error("SSE error for", cfg.directory, message);
       }
       if (signal.aborted) return;
+      log.warn("SSE reconnecting in", backoff, "ms", cfg.directory);
       await Bun.sleep(backoff);
       backoff = Math.min(backoff * 2, 30_000);
     }
@@ -64,7 +70,7 @@ export async function startBot() {
   const sseSubscriptions = new Map<string, AbortController>();
 
   client.once(Events.ClientReady, async (c) => {
-    console.log(`Bot ready as ${c.user.tag}`);
+    log.info(`Bot ready as ${c.user.tag}`);
 
     const seenPairs = new Set<string>();
     for (const ch of channels) {
@@ -95,17 +101,22 @@ export async function startBot() {
 
   client.on(Events.MessageCreate, async (msg) => {
     if (msg.author.bot) return;
+    log.debug("message", msg.channelId, msg.channel.type, msg.author.id, msg.content.slice(0, 80));
 
     const cfgRaw = await db
       .select()
       .from(schema.channelConfigs)
       .where(eq(schema.channelConfigs.channelId, msg.channelId))
       .get();
-    if (!cfgRaw) return;
+    if (!cfgRaw) {
+      log.debug("no channel config for", msg.channelId);
+      return;
+    }
 
     const cfg: ChannelConfig = cfgRaw;
 
     if (msg.channel.type === ChannelType.GuildText && isBotMentioned(msg, client)) {
+      log.info("channel mention, creating thread+session");
       await handleChannelMention(db, client, msg, cfg);
       return;
     }
@@ -114,17 +125,21 @@ export async function startBot() {
       msg.channel.type === ChannelType.PublicThread ||
       msg.channel.type === ChannelType.PrivateThread
     ) {
+      log.debug("message in thread", msg.channelId);
       const ts = await db
         .select()
         .from(schema.threadSessions)
         .where(eq(schema.threadSessions.threadId, msg.channelId))
         .get();
       if (!ts) {
+        log.debug("no session mapping for thread", msg.channelId);
         if (isBotMentioned(msg, client)) {
+          log.info("bot mentioned, creating new session");
           await handleThreadMentionNewSession(db, client, msg, cfg);
         }
         return;
       }
+      log.debug("found session", ts.sessionId, "cursor", ts.lastSentMessageId);
       await handleThreadMessage(db, client, msg, cfg, ts);
     }
   });
@@ -137,12 +152,16 @@ function isBotMentioned(msg: Message, client: Client): boolean {
 }
 
 async function handleChannelMention(db: Db, client: Client, msg: Message, cfg: ChannelConfig) {
+  log.debug("creating thread");
   const thread = await msg.startThread({
     name: `OpenCode — ${msg.content.slice(0, 80)}`,
     autoArchiveDuration: ThreadAutoArchiveDuration.OneHour,
   });
+  log.debug("thread created", thread.id);
 
+  log.debug("creating session");
   const sessionId = await createSession(cfg, thread.name);
+  log.debug("session created", sessionId);
 
   await db.insert(schema.threadSessions).values({
     threadId: thread.id,
@@ -150,8 +169,11 @@ async function handleChannelMention(db: Db, client: Client, msg: Message, cfg: C
     sessionId,
     lastSentMessageId: msg.id,
   });
+  log.debug("mapping stored", thread.id, "->", sessionId);
 
+  log.debug("sending prompt_async");
   await promptAsync(cfg, sessionId, msg.content);
+  log.debug("prompt_async sent");
 }
 
 async function handleThreadMentionNewSession(
@@ -179,6 +201,7 @@ async function handleThreadMessage(
   cfg: ChannelConfig,
   ts: typeof schema.threadSessions.$inferSelect,
 ) {
+  log.debug("fetching messages since cursor", ts.lastSentMessageId);
   const messages = await msg.channel.messages.fetch({ limit: 100 });
   const collected: Message[] = [];
   for (const m of messages.values()) {
@@ -187,11 +210,17 @@ async function handleThreadMessage(
     collected.push(m);
   }
   collected.reverse();
-  if (collected.length === 0) return;
+  if (collected.length === 0) {
+    log.debug("no new messages to send");
+    return;
+  }
+  log.debug("collected", collected.length, "messages");
 
   const promptText = collected.map((m) => `[${m.author.displayName}] ${m.content}`).join("\n");
 
+  log.debug("sending prompt_async to session", ts.sessionId);
   await promptAsync(cfg, ts.sessionId, promptText);
+  log.debug("prompt_async sent, updating cursor to", collected[collected.length - 1]!.id);
 
   await db
     .update(schema.threadSessions)
@@ -217,14 +246,21 @@ function getPart(event: OpenCodeEvent):
 
 async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
   const sessionId = getSessionId(event);
-  if (!sessionId) return;
+  if (!sessionId) {
+    log.debug("event without sessionID:", event.type);
+    return;
+  }
 
   const ts = await db
     .select()
     .from(schema.threadSessions)
     .where(eq(schema.threadSessions.sessionId, sessionId))
     .get();
-  if (!ts) return;
+  if (!ts) {
+    log.debug("event for unknown session", sessionId, event.type);
+    return;
+  }
+  log.debug("event", event.type, "session", sessionId, "thread", ts.threadId);
 
   const channel = await client.channels.fetch(ts.threadId);
   if (!channel?.isTextBased()) return;

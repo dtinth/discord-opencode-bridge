@@ -97,4 +97,37 @@ program
     }
   });
 
+program.command("list-sessions").action(async () => {
+  const { db } = createDb(config.databasePath);
+  const sessions = await db.select().from(schema.threadSessions);
+  if (sessions.length === 0) {
+    console.log("No sessions.");
+    return;
+  }
+  for (const s of sessions) {
+    console.log(
+      `thread=${s.threadId} channel=${s.channelId} session=${s.sessionId} cursor=${s.lastSentMessageId ?? "-"}`,
+    );
+  }
+});
+
+program
+  .command("get-session")
+  .requiredOption("--thread-id <id>", "Discord thread ID")
+  .action(async (opts) => {
+    const { db } = createDb(config.databasePath);
+    const s = await db
+      .select()
+      .from(schema.threadSessions)
+      .where(eq(schema.threadSessions.threadId, opts.threadId))
+      .get();
+    if (!s) {
+      console.log("No session found for this thread.");
+      return;
+    }
+    console.log(
+      `thread=${s.threadId} channel=${s.channelId} session=${s.sessionId} cursor=${s.lastSentMessageId ?? "-"}`,
+    );
+  });
+
 export { program };

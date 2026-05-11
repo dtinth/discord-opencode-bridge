@@ -6,6 +6,7 @@
   "dependencies": {
     "@opencode-ai/sdk": "^1.14.48",
     "commander": "^14.0.3",
+    "consola": "^3.4.2",
     "discord.js": "^14.26.4",
     "drizzle-orm": "^0.45.2"
   },
