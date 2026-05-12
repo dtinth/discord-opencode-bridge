@@ -352,7 +352,11 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
   if (!channel?.isTextBased()) return;
   if (!channel.isSendable()) return;
 
+  let lastTypingTime = 0;
   const showTyping = () => {
+    const now = Date.now();
+    if (now - lastTypingTime < 5000) return;
+    lastTypingTime = now;
     if ("sendTyping" in channel)
       (channel as { sendTyping: () => Promise<void> }).sendTyping().catch(() => {});
   };
