@@ -36,3 +36,4 @@ bridge.db
 bridge.db-shm
 bridge.db-wal
 drizzle
+opencode.json

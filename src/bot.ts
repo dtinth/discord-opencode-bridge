@@ -5,12 +5,6 @@ import {
   ChannelType,
   ThreadAutoArchiveDuration,
   type Message,
-  type ButtonInteraction,
-  type StringSelectMenuInteraction,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  StringSelectMenuBuilder,
 } from "discord.js";
 import { createDb, schema, type Db } from "./db";
 import { eq } from "drizzle-orm";
@@ -19,7 +13,6 @@ import { log } from "./debug";
 import {
   createSession,
   promptAsync,
-  respondToPermission,
   subscribe,
   type ChannelConfig,
   type OpenCodeEvent,
@@ -32,29 +25,13 @@ function startEventListener(
   signal: AbortSignal,
 ) {
   const run = async () => {
-    let backoff = 500;
-    while (!signal.aborted) {
-      try {
-        log.debug("SSE connecting", cfg.directory);
-        const stream = subscribe(cfg, signal);
-        backoff = 500;
-        log.debug("SSE connected", cfg.directory);
-        for await (const event of stream) {
-          if (signal.aborted) break;
-          log.debug("SSE event", event.type, event.sessionID);
-          onEvent(event);
-        }
-        log.debug("SSE stream ended", cfg.directory);
-      } catch (err: unknown) {
-        if (signal.aborted) return;
-        const message = err instanceof Error ? err.message : String(err);
-        log.error("SSE error for", cfg.directory, message);
-      }
-      if (signal.aborted) return;
-      log.warn("SSE reconnecting in", backoff, "ms", cfg.directory);
-      await Bun.sleep(backoff);
-      backoff = Math.min(backoff * 2, 30_000);
+    const stream = subscribe(cfg, signal);
+    for await (const event of stream) {
+      if (signal.aborted) break;
+      log.debug("SSE event", event.type, event.sessionID);
+      onEvent(event);
     }
+    log.debug("SSE stream ended", cfg.directory);
   };
   run();
 }
@@ -152,35 +129,6 @@ export async function startBot() {
     const cfg: ChannelConfig = cfgRaw;
 
     await interaction.deferUpdate();
-
-    if (interaction.isButton() && customId.startsWith("perm_")) {
-      const parts = customId.split("_");
-      const permissionId = parts[1]!;
-      const action = parts[2]!;
-      try {
-        await respondToPermission(
-          cfg,
-          ts.sessionId,
-          permissionId,
-          action === "approve" ? "once" : "reject",
-        );
-        log.debug("permission response sent", permissionId, action);
-      } catch (err) {
-        log.error("permission response failed", err);
-      }
-    }
-
-    if (interaction.isStringSelectMenu() && customId.startsWith("q_")) {
-      const value = interaction.values[0];
-      if (value) {
-        try {
-          await promptAsync(cfg, ts.sessionId, value);
-          log.debug("question response sent", value);
-        } catch (err) {
-          log.error("question response failed", err);
-        }
-      }
-    }
   });
 
   client.on(Events.MessageCreate, async (msg) => {
@@ -249,6 +197,7 @@ System message: This session is bridged from Discord.
 The bot's user ID is <@${client.user!.id}>.
 You are in Discord thread ID ${threadId}.
 When you receive new messages, pay attention to the message that mentioned you first, then use the earlier messages as supporting context.
+When replying, tag the user who mentioned you using the <@userId> format so they get notified.
 </discord-harness>`;
 }
 
@@ -429,43 +378,15 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
       break;
     }
     case "permission.asked": {
-      showTyping();
-      const props = event.properties;
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`perm_${props?.id}_approve`)
-          .setLabel("Approve")
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId(`perm_${props?.id}_reject`)
-          .setLabel("Reject")
-          .setStyle(ButtonStyle.Danger),
+      await channel.send(
+        `🔒 A permission prompt has appeared in OpenCode. Please approve or reject it directly.`,
       );
-      await channel.send({
-        content: `🔒 **Permission requested**\n${props?.description ?? ""}`,
-        components: [row],
-      });
       break;
     }
     case "question.asked": {
-      showTyping();
-      const props = event.properties;
-      const opts = props?.options ?? [];
-      if (opts.length === 0) break;
-      const select = new StringSelectMenuBuilder()
-        .setCustomId(`q_${props?.id}`)
-        .setPlaceholder("Choose an option...")
-        .addOptions(
-          opts.map((opt) => ({
-            label: opt.label ?? String(opt.value),
-            value: opt.value,
-          })),
-        );
-      const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select);
-      await channel.send({
-        content: `❓ **Question**\n${props?.description ?? ""}`,
-        components: [row],
-      });
+      await channel.send(
+        `❓ A question prompt has appeared in OpenCode. Please answer it directly.`,
+      );
       break;
     }
     case "session.updated": {
@@ -486,28 +407,53 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
   }
 }
 
+// Based on Kimaki's message formatting (https://github.com/remorses/kimaki)
 function formatToolPart(part: {
   name?: string;
-  state?: { input?: Record<string, unknown> };
+  tool?: string;
+  state?: { input?: Record<string, unknown>; status?: string; error?: string };
 }): string {
+  const tool = part.tool ?? part.name ?? "tool";
   const input = part.state?.input ?? {};
-  if (part.name === "edit") {
-    const file = String(input.file ?? "?");
-    const added = String(input.added ?? "?");
-    const removed = String(input.removed ?? "?");
-    return `◼︎ *${file}* (+${added}-${removed})`;
+  const icon =
+    part.state?.status === "error"
+      ? "⨯"
+      : tool === "edit" || tool === "write" || tool === "apply_patch"
+        ? "◼︎"
+        : "┣";
+  if (tool === "edit") {
+    const filePath = String(input.filePath ?? input.file ?? "");
+    const added = String(
+      input.newString ? String(input.newString).split("\n").length : (input.added ?? "?"),
+    );
+    const removed = String(
+      input.oldString ? String(input.oldString).split("\n").length : (input.removed ?? "?"),
+    );
+    return `${icon} *${filePath.split("/").pop()}* (+${added}-${removed})`;
   }
-  if (part.name === "write" && input.path) {
-    const path = String(input.path);
-    const content = String(input.content ?? "");
-    return `◼︎ *${path}* (${content.length} chars)`;
+  if (tool === "write" && input.filePath) {
+    const lines = String(input.content ?? "").split("\n").length;
+    return `${icon} *${String(input.filePath).split("/").pop()}* (${lines} lines)`;
   }
-  if (part.name === "bash" && input.command) {
+  if (tool === "bash" && input.command) {
     const command = String(input.command);
-    return `┣ bash ${command.split("\n")[0]}`;
+    return `${icon} bash _${command.split("\n")[0]}_`;
   }
-  if (part.name === "read" && input.filePath) return `┣ *${String(input.filePath)}*`;
-  if (part.name === "glob") return `┣ *${String(input.pattern ?? "?")}*`;
-  if (part.name === "grep") return `┣ *${String(input.pattern ?? "?")}*`;
-  return `┣ ${part.name ?? "tool"} ${JSON.stringify(input).slice(0, 80)}`;
+  if (tool === "read")
+    return `${icon} *${String(input.filePath ?? "")
+      .split("/")
+      .pop()}*`;
+  if (tool === "glob") return `${icon} *${String(input.pattern ?? "")}*`;
+  if (tool === "grep") return `${icon} *${String(input.pattern ?? "")}*`;
+  if (tool === "webfetch") return `${icon} ${String(input.url ?? "").replace(/^https?:\/\//, "")}`;
+  if (tool === "skill") return `${icon} _${String(input.name ?? "")}_`;
+  if (tool === "list")
+    return `${icon} *${
+      String(input.path ?? "")
+        .split("/")
+        .pop() ||
+      input.path ||
+      ""
+    }*`;
+  return `${icon} ${tool}`;
 }

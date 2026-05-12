@@ -84,15 +84,23 @@ export interface Part {
   text?: string;
   time?: { end?: string };
   name?: string;
+  tool?: string;
   state?: { status?: string; input?: Record<string, unknown> };
 }
 
 export interface OpenCodeEvent {
   type: string;
   sessionID?: string;
-  properties?: {
+  properties?: Record<string, unknown> & {
     sessionID?: string;
     id?: string;
+    permission?: string;
+    patterns?: string[];
+    questions?: Array<{
+      header?: string;
+      question?: string;
+      options?: Array<{ label: string; value: string }>;
+    }>;
     description?: string;
     options?: Array<{ label: string; value: string }>;
     error?: { message?: string };
@@ -102,46 +110,4 @@ export interface OpenCodeEvent {
   part?: Part;
 }
 
-async function* sseStream(
-  cfg: ChannelConfig,
-  path: string,
-  signal: AbortSignal,
-): AsyncGenerator<OpenCodeEvent> {
-  const url = new URL(path, cfg.serverUrl).href;
-  const res = await fetch(url, {
-    headers: headers(cfg),
-    signal,
-  });
-  if (!res.ok || !res.body) throw new Error(`SSE connection failed: ${res.status}`);
-
-  const reader = res.body.getReader();
-  let buffer = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += new TextDecoder().decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          try {
-            const data = JSON.parse(line.slice(6)) as OpenCodeEvent;
-            yield data;
-          } catch {
-            // skip malformed JSON
-          }
-        }
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
-
-export function subscribe(cfg: ChannelConfig, signal: AbortSignal): AsyncGenerator<OpenCodeEvent> {
-  return sseStream(cfg, `/event?directory=${encodeURIComponent(cfg.directory)}`, signal);
-}
+export { subscribe } from "./sse";
