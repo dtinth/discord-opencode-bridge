@@ -3,6 +3,9 @@
   "private": true,
   "type": "module",
   "module": "index.ts",
+  "scripts": {
+    "bot": "src/index.ts"
+  },
   "dependencies": {
     "@opencode-ai/sdk": "^1.14.48",
     "commander": "^14.0.3",
