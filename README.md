@@ -50,9 +50,18 @@ DEBUG=bridge:* bun run src/index.ts run
 kill -USR1 <pid>
 ```
 
+## Permissions and question prompts
+
+This bridge intentionally does **not** implement interactive approval for permission or question prompts from OpenCode. When the model requests a permission or asks a question, the bot sends a notification to the Discord thread telling you to handle it directly in OpenCode.
+
+**Recommendations** for a smoother experience:
+
+- **Permission prompts** — Run OpenCode in a sandboxed environment and [configure all permissions](https://opencode.ai/docs/config/#permissions) to either `allow` or `deny` but never `ask`. This prevents permission prompts from blocking the session.
+- **Question prompts** — Set the `question` tool to `deny` in your OpenCode [permissions config](https://opencode.ai/docs/permissions/). When denied, the model will ask you as a normal text question instead of using the tool.
+
 ## How it works
 
 - Messages mentioning the bot in a configured text channel create a new Discord thread and an OpenCode session.
 - Messages in a thread with an active session are accumulated and sent to the model via `prompt_async`.
 - Model responses stream back via SSE events and are posted as individual Discord messages.
-- Permission and question requests from the model are forwarded as interactive Discord components (buttons, dropdowns).
+- Permission and question requests from the model are not handled interactively — the bot notifies you to handle them directly in OpenCode.
