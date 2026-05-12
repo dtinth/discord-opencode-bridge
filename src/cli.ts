@@ -130,4 +130,44 @@ program
     );
   });
 
+program
+  .command("link-thread")
+  .description("Link an existing Discord thread to an existing OpenCode session")
+  .requiredOption("--thread-id <id>", "Discord thread ID (numeric)")
+  .requiredOption("--session-id <id>", "OpenCode session ID (starts with ses_)")
+  .requiredOption("--channel-id <id>", "Discord channel ID (parent channel)")
+  .action(async (opts) => {
+    if (!/^\d+$/.test(opts.threadId)) {
+      console.error("Error: --thread-id must be numeric");
+      process.exit(1);
+    }
+    if (!opts.sessionId.startsWith("ses_")) {
+      console.error("Error: --session-id must start with ses_");
+      process.exit(1);
+    }
+    const { db } = createDb(config.databasePath);
+    await db.insert(schema.threadSessions).values({
+      threadId: opts.threadId,
+      channelId: opts.channelId,
+      sessionId: opts.sessionId,
+    });
+    console.log(
+      `Linked thread ${opts.threadId} → session ${opts.sessionId} (channel ${opts.channelId})`,
+    );
+  });
+
+program
+  .command("unlink-thread")
+  .description("Remove an existing thread-to-session mapping")
+  .requiredOption("--thread-id <id>", "Discord thread ID (numeric)")
+  .action(async (opts) => {
+    if (!/^\d+$/.test(opts.threadId)) {
+      console.error("Error: --thread-id must be numeric");
+      process.exit(1);
+    }
+    const { db } = createDb(config.databasePath);
+    await db.delete(schema.threadSessions).where(eq(schema.threadSessions.threadId, opts.threadId));
+    console.log(`Unlinked thread ${opts.threadId}`);
+  });
+
 export { program };

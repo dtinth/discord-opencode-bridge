@@ -455,5 +455,6 @@ function formatToolPart(part: {
       input.path ||
       ""
     }*`;
+  if (tool === "task" && input.description) return `${icon} task: ${String(input.description)}`;
   return `${icon} ${tool}`;
 }
