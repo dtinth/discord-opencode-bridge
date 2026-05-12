@@ -2,7 +2,7 @@
 
 A standalone bridge that relays messages between Discord threads and OpenCode AI coding sessions. Runs separately from OpenCode — connects to one or more `opencode serve` instances via its HTTP API. A single bot can connect to multiple servers, each with different directories.
 
-Heavily inspired by [Kimaki](https://github.com/remorses/kimaki), but designed to be lightweight and minimal — this bridge intentionally omits many of Kimaki's features in favor of simplicity.
+Heavily inspired by [Kimaki](https://github.com/remorses/kimaki), but this bot is designed differently — it does not wrap OpenCode or add plugins, but instead connects to a remote `opencode serve` and can handle multiple remotes. If you want something more full-featured — voice mode, bot management from within Discord, advanced access control, screensharing — check out Kimaki.
 
 ## Setup
 
