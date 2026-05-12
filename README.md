@@ -18,13 +18,13 @@ Heavily inspired by [Kimaki](https://github.com/remorses/kimaki), but designed t
    DISCORD_TOKEN=your_bot_token_here
    ```
 
-   `DATABASE_PATH` defaults to `./bridge.db` — set it in `.env` only if you want a different location. Bun autoloads `.env` files, so no export or dotenv command is needed.
+   `DATABASE_PATH` defaults to `./bridge.db` — set it only if you want a different location. You can also specify these as environment variables instead.
 
    To create a bot and get its token, go to the [Discord Developer Portal](https://discord.com/developers/applications), create a new application, go to **Bot**, create the bot, and enable **Message Content Intent** under Privileged Gateway Intents.
 
 5. **View available commands** — `bun bot` prints the help page with all available commands.
 
-6. **Invite the bot to a server** — `bun bot invite` generates a Discord OAuth2 invite URL with the required permissions. Open the URL in a browser to add the bot. The old-format token can be decoded to extract the client ID automatically; if you have a new-format token, the command tells you what to do.
+6. **Invite the bot to a server** — `bun bot invite` prints a URL. Open it in a browser to add the bot to your server.
 
 7. **Link a channel** — Map a Discord channel to an OpenCode server and directory:
 
@@ -54,6 +54,17 @@ Once the bot is running, mention it in a linked channel to create a Discord thre
 | `get-session`    | Get the session mapping for a specific thread                  |
 | `link-thread`    | Manually link a Discord thread to an existing OpenCode session |
 | `unlink-thread`  | Remove a thread→session link                                   |
+
+## Questions
+
+**Can I link an existing OpenCode session to an existing Discord thread?**
+Yes — use `bun bot link-thread --thread-id <id> --session-id <ses_id> --channel-id <id>`.
+
+**Can I manage channels from within Discord?**
+No — all bot management (adding/removing channels, linking threads) must be done through the CLI. The bot only handles message relay.
+
+**Can I restrict who can use the bot?**
+Yes — use Discord's built-in permission system. Remove the **Send Messages** permission for the bot's channel for roles you want to exclude. Only users with access will be able to mention the bot.
 
 ## Debug logging
 
