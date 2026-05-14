@@ -86,6 +86,8 @@ export interface Part {
   name?: string;
   tool?: string;
   state?: { status?: string; input?: Record<string, unknown> };
+  messageID?: string;
+  sessionID?: string;
 }
 
 export interface OpenCodeEvent {
