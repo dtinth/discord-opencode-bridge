@@ -53,6 +53,7 @@ function coreForSession(
   let core = sessionCores.get(sessionId);
   if (core) return core;
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  let lastTypingTime = 0;
   const coreRef = { current: null as ThreadCore | null };
   const delegate: ThreadCoreDelegate = {
     sendMessage: (reqId, _ch, content) => {
@@ -104,6 +105,19 @@ function coreForSession(
         clearTimeout(timer);
         timers.delete(timerId);
       }
+    },
+    showTyping: () => {
+      const now = Date.now();
+      if (now - lastTypingTime < 5000) return;
+      lastTypingTime = now;
+      client.channels
+        .fetch(threadId)
+        .then((ch) => {
+          if (ch?.isTextBased() && "sendTyping" in ch) {
+            (ch as { sendTyping: () => Promise<void> }).sendTyping().catch(() => {});
+          }
+        })
+        .catch(() => {});
     },
   };
   core = new ThreadCore(channelId, delegate);
@@ -430,19 +444,9 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
   if (!channel?.isTextBased()) return;
   if (!channel.isSendable()) return;
 
-  let lastTypingTime = 0;
-  const showTyping = () => {
-    const now = Date.now();
-    if (now - lastTypingTime < 5000) return;
-    lastTypingTime = now;
-    if ("sendTyping" in channel)
-      (channel as { sendTyping: () => Promise<void> }).sendTyping().catch(() => {});
-  };
-
   if (event.type === "message.part.updated") {
     const core = coreForSession(sessionId, ts.channelId, client, ts.threadId);
     core.handleOpenCodeEvent(event);
-    showTyping();
     return;
   }
   if (event.type === "message.updated") {
