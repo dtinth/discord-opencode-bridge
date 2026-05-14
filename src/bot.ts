@@ -29,6 +29,10 @@ function startEventListener(
     for await (const event of stream) {
       if (signal.aborted) break;
       log.debug("SSE event", event.type, event.sessionID);
+      if (envConfig.debugEventsPath) {
+        const fs = await import("fs");
+        fs.appendFileSync(envConfig.debugEventsPath, JSON.stringify(event) + "\n");
+      }
       await onEvent(event);
     }
     log.debug("SSE stream ended", cfg.directory);
@@ -79,6 +83,10 @@ export async function startBot() {
 
   client.once(Events.ClientReady, async (c) => {
     log.info(`Bot ready as ${c.user.tag}`);
+
+    if (envConfig.debugEventsPath) {
+      log.info(`SSE event debug logging enabled → ${envConfig.debugEventsPath}`);
+    }
 
     const seenPairs = new Set<string>();
     for (const ch of channels) {
@@ -240,7 +248,9 @@ function formatFooter(info: Record<string, unknown>): string | undefined {
   const modelID = info.modelID as string | undefined;
   const finish = info.finish as string | undefined;
   const role = info.role as string | undefined;
+  const time = info.time as Record<string, unknown> | undefined;
   if (role !== "assistant" || finish === "tool-calls" || !modelID) return;
+  if (!time?.completed) return;
   return `*${modelID}*`;
 }
 

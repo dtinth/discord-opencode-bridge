@@ -37,3 +37,4 @@ bridge.db-shm
 bridge.db-wal
 drizzle
 opencode.json
+*.local
