@@ -20,6 +20,7 @@ export class ThreadCoreTester {
       clearTimer: (id) => {
         this.timers.delete(id);
       },
+      showTyping: () => {},
     };
     this.core = new ThreadCore(channelId, delegate);
   }

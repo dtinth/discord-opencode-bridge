@@ -109,6 +109,25 @@ describe("ThreadCore", () => {
     expect(t.sentMessages).toHaveLength(1);
   });
 
+  test("intermediate message.updated without time.completed does not flush deferred text", () => {
+    const t = new ThreadCoreTester("ch_1");
+
+    t.dispatchOpenCodeEvent(textPart("Hello", "m1"));
+
+    // Intermediate update: finish set but no time.completed
+    t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop"));
+
+    // Text should NOT have been sent yet — still waiting for time.completed
+    expect(t.sentMessages).toEqual([]);
+
+    // Final update with time.completed
+    t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 500));
+    expect(t.sentMessages).toContainEqual({
+      requestId: expect.any(String),
+      content: "⬥ Hello — *gpt-4*",
+    });
+  });
+
   test("multiple text parts flush previous deferred text before deferring new one", () => {
     const t = new ThreadCoreTester("ch_1");
 

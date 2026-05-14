@@ -5,6 +5,7 @@ export interface ThreadCoreDelegate {
   editMessage(channelId: string, messageId: string, content: string): void;
   setTimer(timerId: string, ms: number): void;
   clearTimer(timerId: string): void;
+  showTyping(): void;
 }
 
 export interface OpenCodeEvent {
@@ -186,6 +187,8 @@ export class ThreadCore {
         this.storeBufferedPart(messageID, part);
       } else if (part.type === "step-finish" && messageID) {
         this.flushBufferedParts(messageID, true);
+      } else {
+        this.delegate.showTyping();
       }
     } else if (event.type === "message.updated") {
       const props = event.properties as Record<string, unknown> | undefined;
@@ -194,24 +197,34 @@ export class ThreadCore {
       const infoId = info.id as string | undefined;
       if (!infoId) return;
 
-      this.cleanupPendingForMessage(infoId);
-
       const deferred = this.deferredTexts.get(infoId);
       if (deferred) {
-        this.deferredTexts.delete(infoId);
-        this.delegate.clearTimer(infoId);
         const footer = formatFooter(info);
-        const content = footer ? `⬥ ${deferred.text} — ${footer}` : `⬥ ${deferred.text}`;
-        const reqId = `req_${++this.requestCounter}`;
-        this.delegate.sendMessage(reqId, this.channelId, content);
+        if (footer) {
+          this.cleanupPendingForMessage(infoId);
+          this.deferredTexts.delete(infoId);
+          this.delegate.clearTimer(infoId);
+          const reqId = `req_${++this.requestCounter}`;
+          this.delegate.sendMessage(reqId, this.channelId, `⬥ ${deferred.text} — ${footer}`);
+          return;
+        }
+        if (info.finish === "tool-calls") {
+          this.cleanupPendingForMessage(infoId);
+          this.deferredTexts.delete(infoId);
+          this.delegate.clearTimer(infoId);
+          const reqId = `req_${++this.requestCounter}`;
+          this.delegate.sendMessage(reqId, this.channelId, `⬥ ${deferred.text}`);
+          return;
+        }
         return;
       }
 
       const previous = this.lastTextMessages.get(infoId);
       if (previous) {
-        this.lastTextMessages.delete(infoId);
         const footer = formatFooter(info);
         if (footer) {
+          this.cleanupPendingForMessage(infoId);
+          this.lastTextMessages.delete(infoId);
           this.delegate.editMessage(
             this.channelId,
             previous.messageId,
