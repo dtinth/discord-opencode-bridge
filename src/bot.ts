@@ -472,8 +472,12 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
           await flushDeferredText(messageID);
           const timer = setTimeout(async () => {
             deferredTexts.delete(messageID);
-            const sent = await channel.send(`⬥ ${text}`);
-            lastTextMessages.set(messageID, sent);
+            try {
+              const sent = await channel.send(`⬥ ${text}`);
+              lastTextMessages.set(messageID, sent);
+            } catch (err) {
+              log.error("Failed to send deferred text", err);
+            }
           }, 200);
           deferredTexts.set(messageID, { channel, text, timer });
         }
