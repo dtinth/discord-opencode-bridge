@@ -43,6 +43,31 @@ function startEventListener(
 const threadUsers = new Map<string, string>();
 const announcedToolParts = new Set<string>();
 const dedupToolPartIds = new Set<string>();
+const lastTextMessages = new Map<
+  string,
+  { edit: (content: string) => Promise<unknown>; content: string }
+>();
+const deferredTexts = new Map<
+  string,
+  {
+    channel: {
+      send: (
+        content: string,
+      ) => Promise<{ edit: (c: string) => Promise<unknown>; content: string }>;
+    };
+    text: string;
+    timer: ReturnType<typeof setTimeout>;
+  }
+>();
+
+async function flushDeferredText(messageID: string): Promise<void> {
+  const deferred = deferredTexts.get(messageID);
+  if (!deferred) return;
+  clearTimeout(deferred.timer);
+  deferredTexts.delete(messageID);
+  const sent = await deferred.channel.send(`⬥ ${deferred.text}`);
+  lastTextMessages.set(messageID, sent);
+}
 
 // Part buffer: messageID → partID → Part
 const partBuffer = new Map<string, Map<string, Part>>();
@@ -443,9 +468,20 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
 
       if (part.type === "text" && part.time?.end) {
         const text = (part.text ?? "").trim();
-        if (text) await channel.send(`⬥ ${text}`);
+        if (text && messageID) {
+          await flushDeferredText(messageID);
+          const timer = setTimeout(async () => {
+            deferredTexts.delete(messageID);
+            const sent = await channel.send(`⬥ ${text}`);
+            lastTextMessages.set(messageID, sent);
+          }, 200);
+          deferredTexts.set(messageID, { channel, text, timer });
+        }
       } else if (part.type === "tool" && part.state?.status === "running") {
-        if (messageID) await flushBufferedParts(channel, messageID, true, part.id);
+        if (messageID) {
+          await flushDeferredText(messageID);
+          await flushBufferedParts(channel, messageID, true, part.id);
+        }
         if (part.id) {
           const key = `${sessionId}-${part.id}`;
           if (announcedToolParts.has(key)) break;
@@ -475,10 +511,38 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
       if (!info) break;
 
       const infoId = info.id as string | undefined;
-      if (infoId) await flushBufferedParts(channel, infoId, false);
+      if (infoId) {
+        await flushBufferedParts(channel, infoId, false);
+      }
 
       const footer = formatFooter(info);
-      if (footer) await channel.send(footer);
+      if (footer) {
+        if (infoId) {
+          const deferred = deferredTexts.get(infoId);
+          if (deferred) {
+            clearTimeout(deferred.timer);
+            deferredTexts.delete(infoId);
+            await deferred.channel.send(`⬥ ${deferred.text} — ${footer}`);
+            break;
+          }
+          const lastMsg = lastTextMessages.get(infoId);
+          if (lastMsg) {
+            await lastMsg.edit(`${lastMsg.content} — ${footer}`);
+            lastTextMessages.delete(infoId);
+            break;
+          }
+        }
+        await channel.send(footer);
+      }
+
+      if (infoId) {
+        lastTextMessages.delete(infoId);
+        const deferred = deferredTexts.get(infoId);
+        if (deferred) {
+          clearTimeout(deferred.timer);
+          deferredTexts.delete(infoId);
+        }
+      }
       break;
     }
     case "permission.asked": {
