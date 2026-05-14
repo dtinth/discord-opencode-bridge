@@ -18,6 +18,7 @@ import {
   type OpenCodeEvent,
   type Part,
 } from "./opencode";
+import { ThreadCore, type ThreadCoreDelegate } from "./core/ThreadCore";
 
 function startEventListener(
   cfg: ChannelConfig,
@@ -41,59 +42,77 @@ function startEventListener(
 }
 
 const threadUsers = new Map<string, string>();
-const announcedToolParts = new Set<string>();
-const dedupToolPartIds = new Set<string>();
-const lastTextMessages = new Map<
-  string,
-  { edit: (content: string) => Promise<unknown>; content: string }
->();
-const deferredTexts = new Map<
-  string,
-  {
-    channel: {
-      send: (
-        content: string,
-      ) => Promise<{ edit: (c: string) => Promise<unknown>; content: string }>;
-    };
-    text: string;
-    timer: ReturnType<typeof setTimeout>;
-  }
->();
+const sessionCores = new Map<string, ThreadCore>();
 
-async function flushDeferredText(messageID: string): Promise<void> {
-  const deferred = deferredTexts.get(messageID);
-  if (!deferred) return;
-  clearTimeout(deferred.timer);
-  deferredTexts.delete(messageID);
-  const sent = await deferred.channel.send(`⬥ ${deferred.text}`);
-  lastTextMessages.set(messageID, sent);
+function coreForSession(
+  sessionId: string,
+  channelId: string,
+  client: Client,
+  threadId: string,
+): ThreadCore {
+  let core = sessionCores.get(sessionId);
+  if (core) return core;
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  const coreRef = { current: null as ThreadCore | null };
+  const delegate: ThreadCoreDelegate = {
+    sendMessage: (reqId, _ch, content) => {
+      client.channels
+        .fetch(threadId)
+        .then((ch) => {
+          if (ch?.isTextBased() && ch.isSendable()) {
+            (ch as { send: (c: string) => Promise<{ id: string }> })
+              .send(content)
+              .then((sent) => {
+                coreRef.current?.handleDiscordMessageCreated(reqId, sent.id);
+              })
+              .catch((err) => log.error("send error", err));
+          }
+        })
+        .catch((err) => log.error("fetch error", err));
+    },
+    editMessage: (_ch, msgId, content) => {
+      client.channels
+        .fetch(threadId)
+        .then((ch) => {
+          if (ch?.isTextBased()) {
+            (
+              ch as {
+                messages: {
+                  fetch: (id: string) => Promise<{ edit: (c: string) => Promise<unknown> }>;
+                };
+              }
+            ).messages
+              .fetch(msgId)
+              .then((msg) => {
+                msg.edit(content).catch((err) => log.error("edit error", err));
+              })
+              .catch((err) => log.error("fetch msg error", err));
+          }
+        })
+        .catch((err) => log.error("fetch error", err));
+    },
+    setTimer: (timerId, ms) => {
+      const timer = setTimeout(() => {
+        timers.delete(timerId);
+        coreRef.current?.handleTimerExpired(timerId);
+      }, ms);
+      timers.set(timerId, timer);
+    },
+    clearTimer: (timerId) => {
+      const timer = timers.get(timerId);
+      if (timer) {
+        clearTimeout(timer);
+        timers.delete(timerId);
+      }
+    },
+  };
+  core = new ThreadCore(channelId, delegate);
+  coreRef.current = core;
+  sessionCores.set(sessionId, core);
+  return core;
 }
 
-// Part buffer: messageID → partID → Part
-const partBuffer = new Map<string, Map<string, Part>>();
 const sseSubscriptions = new Map<string, AbortController>();
-
-function getPart(event: OpenCodeEvent): Part | undefined {
-  return event.properties?.part ?? event.part;
-}
-
-function shouldSendPart(part: Part, force: boolean): boolean {
-  if (part.type === "step-start" || part.type === "step-finish") return false;
-  if (part.type === "tool" && part.state?.status === "pending") return false;
-  if (!force && part.type === "text" && !part.time?.end) return false;
-  if (!force && part.type === "tool" && part.state?.status === "completed") return false;
-  return true;
-}
-
-function storePart(part: Part, messageID: string): void {
-  if (!part.id) return;
-  let messageParts = partBuffer.get(messageID);
-  if (!messageParts) {
-    messageParts = new Map();
-    partBuffer.set(messageID, messageParts);
-  }
-  messageParts.set(part.id, part);
-}
 
 export async function startBot() {
   const { db } = createDb(envConfig.databasePath);
@@ -270,16 +289,6 @@ function buildInitialPrompt(client: Client, threadId: string, messages: Message[
   return `${formatSystemPreamble(client, threadId)}\n${formatUserMessages(messages)}`;
 }
 
-function formatFooter(info: Record<string, unknown>): string | undefined {
-  const modelID = info.modelID as string | undefined;
-  const finish = info.finish as string | undefined;
-  const role = info.role as string | undefined;
-  const time = info.time as Record<string, unknown> | undefined;
-  if (role !== "assistant" || finish === "tool-calls" || !modelID) return;
-  if (!time?.completed) return;
-  return `*${modelID}*`;
-}
-
 function ensureEventListener(db: Db, client: Client, cfg: ChannelConfig): void {
   const key = `${cfg.serverUrl}|${cfg.directory}`;
   if (sseSubscriptions.has(key)) return;
@@ -292,35 +301,6 @@ function ensureEventListener(db: Db, client: Client, cfg: ChannelConfig): void {
     ac.signal,
   );
   sseSubscriptions.set(key, ac);
-}
-
-async function flushBufferedParts(
-  channel: { send: (content: string) => Promise<unknown> },
-  messageID: string,
-  force: boolean,
-  skipPartId?: string,
-): Promise<void> {
-  const messageParts = partBuffer.get(messageID);
-  if (!messageParts) return;
-
-  const toDelete: string[] = [];
-  for (const [partId, part] of messageParts) {
-    if (skipPartId && partId === skipPartId) continue;
-    if (!shouldSendPart(part, force)) continue;
-    if (part.type === "text") {
-      const text = (part.text ?? "").trim();
-      if (text) await channel.send(`⬥ ${text}`);
-    } else if (part.type === "tool") {
-      if (part.state?.status === "completed" && dedupToolPartIds.has(partId)) {
-        dedupToolPartIds.delete(partId);
-      } else {
-        await channel.send(formatToolPart(part));
-      }
-    }
-    toDelete.push(partId);
-  }
-  for (const id of toDelete) messageParts.delete(id);
-  if (messageParts.size === 0) partBuffer.delete(messageID);
 }
 
 async function handleChannelMention(db: Db, client: Client, msg: Message, cfg: ChannelConfig) {
@@ -459,96 +439,19 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
       (channel as { sendTyping: () => Promise<void> }).sendTyping().catch(() => {});
   };
 
+  if (event.type === "message.part.updated") {
+    const core = coreForSession(sessionId, ts.channelId, client, ts.threadId);
+    core.handleOpenCodeEvent(event);
+    showTyping();
+    return;
+  }
+  if (event.type === "message.updated") {
+    const core = coreForSession(sessionId, ts.channelId, client, ts.threadId);
+    core.handleOpenCodeEvent(event);
+    return;
+  }
+
   switch (event.type) {
-    case "message.part.updated": {
-      const part = getPart(event);
-      if (!part) break;
-
-      const messageID = part.messageID;
-
-      if (part.type === "text" && part.time?.end) {
-        const text = (part.text ?? "").trim();
-        if (text && messageID) {
-          await flushDeferredText(messageID);
-          const timer = setTimeout(async () => {
-            deferredTexts.delete(messageID);
-            try {
-              const sent = await channel.send(`⬥ ${text}`);
-              lastTextMessages.set(messageID, sent);
-            } catch (err) {
-              log.error("Failed to send deferred text", err);
-            }
-          }, 200);
-          deferredTexts.set(messageID, { channel, text, timer });
-        }
-      } else if (part.type === "tool" && part.state?.status === "running") {
-        if (messageID) {
-          await flushDeferredText(messageID);
-          await flushBufferedParts(channel, messageID, true, part.id);
-        }
-        if (part.id) {
-          const key = `${sessionId}-${part.id}`;
-          if (announcedToolParts.has(key)) break;
-          announcedToolParts.add(key);
-          dedupToolPartIds.add(part.id);
-          await channel.send(formatToolPart(part));
-        }
-      } else if (part.type === "step-finish" && messageID) {
-        await flushBufferedParts(channel, messageID, true);
-      } else {
-        showTyping();
-      }
-
-      // Buffer parts that can't be sent yet
-      if (messageID && part.id) {
-        if (
-          (part.type === "text" && !part.time?.end) ||
-          (part.type === "tool" && part.state?.status === "completed")
-        ) {
-          storePart(part, messageID);
-        }
-      }
-      break;
-    }
-    case "message.updated": {
-      const info = event.properties?.info as Record<string, unknown> | undefined;
-      if (!info) break;
-
-      const infoId = info.id as string | undefined;
-      if (infoId) {
-        await flushBufferedParts(channel, infoId, false);
-      }
-
-      const footer = formatFooter(info);
-      if (footer) {
-        if (infoId) {
-          const deferred = deferredTexts.get(infoId);
-          if (deferred) {
-            clearTimeout(deferred.timer);
-            deferredTexts.delete(infoId);
-            await deferred.channel.send(`⬥ ${deferred.text} — ${footer}`);
-            break;
-          }
-          const lastMsg = lastTextMessages.get(infoId);
-          if (lastMsg) {
-            await lastMsg.edit(`${lastMsg.content} — ${footer}`);
-            lastTextMessages.delete(infoId);
-            break;
-          }
-        }
-        await channel.send(footer);
-      }
-
-      if (infoId) {
-        lastTextMessages.delete(infoId);
-        const deferred = deferredTexts.get(infoId);
-        if (deferred) {
-          clearTimeout(deferred.timer);
-          deferredTexts.delete(infoId);
-        }
-      }
-      break;
-    }
     case "permission.asked": {
       await channel.send(
         `🔒 A permission prompt has appeared in OpenCode. Please approve or reject it directly.`,
@@ -577,58 +480,4 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
       break;
     }
   }
-}
-
-// Based on Kimaki's message formatting (https://github.com/remorses/kimaki)
-function formatToolPart(part: {
-  name?: string;
-  tool?: string;
-  state?: { title?: string; input?: Record<string, unknown>; status?: string; error?: string };
-}): string {
-  const tool = part.tool ?? part.name ?? "tool";
-  const input = part.state?.input ?? {};
-  const icon =
-    part.state?.status === "error"
-      ? "⨯"
-      : tool === "edit" || tool === "write" || tool === "apply_patch"
-        ? "◼︎"
-        : "┣";
-  const description = part.state?.title || "";
-  if (tool === "edit") {
-    const filePath = String(input.filePath ?? input.file ?? "");
-    const added = String(
-      input.newString ? String(input.newString).split("\n").length : (input.added ?? "?"),
-    );
-    const removed = String(
-      input.oldString ? String(input.oldString).split("\n").length : (input.removed ?? "?"),
-    );
-    return `${icon} *${filePath.split("/").pop()}* (+${added}-${removed})`;
-  }
-  if (tool === "write" && input.filePath) {
-    const lines = String(input.content ?? "").split("\n").length;
-    return `${icon} *${String(input.filePath).split("/").pop()}* (${lines} lines)`;
-  }
-  if (tool === "bash") {
-    if (description) return `${icon} ${description}`;
-    if (input.command) return `${icon} bash _${String(input.command).split("\n")[0]}_`;
-    return `${icon} bash`;
-  }
-  if (tool === "read")
-    return `${icon} *${String(input.filePath ?? "")
-      .split("/")
-      .pop()}*`;
-  if (tool === "glob") return `${icon} *${String(input.pattern ?? "")}*`;
-  if (tool === "grep") return `${icon} *${String(input.pattern ?? "")}*`;
-  if (tool === "webfetch") return `${icon} ${String(input.url ?? "").replace(/^https?:\/\//, "")}`;
-  if (tool === "skill") return `${icon} _${String(input.name ?? "")}_`;
-  if (tool === "list")
-    return `${icon} *${
-      String(input.path ?? "")
-        .split("/")
-        .pop() ||
-      input.path ||
-      ""
-    }*`;
-  if (tool === "task" && input.description) return `${icon} task: ${String(input.description)}`;
-  return `${icon} ${tool}`;
 }
