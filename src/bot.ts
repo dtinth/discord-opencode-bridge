@@ -21,7 +21,7 @@ import {
 
 function startEventListener(
   cfg: ChannelConfig,
-  onEvent: (event: OpenCodeEvent) => void,
+  onEvent: (event: OpenCodeEvent) => Promise<void>,
   signal: AbortSignal,
 ) {
   const run = async () => {
@@ -29,7 +29,7 @@ function startEventListener(
     for await (const event of stream) {
       if (signal.aborted) break;
       log.debug("SSE event", event.type, event.sessionID);
-      onEvent(event);
+      await onEvent(event);
     }
     log.debug("SSE stream ended", cfg.directory);
   };
@@ -425,7 +425,6 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
       if (!part) break;
 
       const messageID = part.messageID;
-      if (messageID && part.id) storePart(part, messageID);
 
       if (part.type === "text" && part.time?.end) {
         const text = (part.text ?? "").trim();
@@ -442,6 +441,16 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
         await flushBufferedParts(channel, messageID, true);
       } else {
         showTyping();
+      }
+
+      // Buffer parts that can't be sent yet
+      if (messageID && part.id) {
+        if (
+          (part.type === "text" && !part.time?.end) ||
+          (part.type === "tool" && part.state?.status === "completed")
+        ) {
+          storePart(part, messageID);
+        }
       }
       break;
     }
@@ -490,7 +499,7 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
 function formatToolPart(part: {
   name?: string;
   tool?: string;
-  state?: { input?: Record<string, unknown>; status?: string; error?: string };
+  state?: { title?: string; input?: Record<string, unknown>; status?: string; error?: string };
 }): string {
   const tool = part.tool ?? part.name ?? "tool";
   const input = part.state?.input ?? {};
@@ -500,6 +509,7 @@ function formatToolPart(part: {
       : tool === "edit" || tool === "write" || tool === "apply_patch"
         ? "◼︎"
         : "┣";
+  const description = part.state?.title || "";
   if (tool === "edit") {
     const filePath = String(input.filePath ?? input.file ?? "");
     const added = String(
@@ -514,9 +524,10 @@ function formatToolPart(part: {
     const lines = String(input.content ?? "").split("\n").length;
     return `${icon} *${String(input.filePath).split("/").pop()}* (${lines} lines)`;
   }
-  if (tool === "bash" && input.command) {
-    const command = String(input.command);
-    return `${icon} bash _${command.split("\n")[0]}_`;
+  if (tool === "bash") {
+    if (description) return `${icon} ${description}`;
+    if (input.command) return `${icon} bash _${String(input.command).split("\n")[0]}_`;
+    return `${icon} bash`;
   }
   if (tool === "read")
     return `${icon} *${String(input.filePath ?? "")
