@@ -42,6 +42,7 @@ function startEventListener(
 
 const threadUsers = new Map<string, string>();
 const announcedToolParts = new Set<string>();
+const dedupToolPartIds = new Set<string>();
 
 // Part buffer: messageID → partID → Part
 const partBuffer = new Map<string, Map<string, Part>>();
@@ -285,7 +286,11 @@ async function flushBufferedParts(
       const text = (part.text ?? "").trim();
       if (text) await channel.send(`⬥ ${text}`);
     } else if (part.type === "tool") {
-      await channel.send(formatToolPart(part));
+      if (part.state?.status === "completed" && dedupToolPartIds.has(partId)) {
+        dedupToolPartIds.delete(partId);
+      } else {
+        await channel.send(formatToolPart(part));
+      }
     }
     toDelete.push(partId);
   }
@@ -445,6 +450,7 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
           const key = `${sessionId}-${part.id}`;
           if (announcedToolParts.has(key)) break;
           announcedToolParts.add(key);
+          dedupToolPartIds.add(part.id);
           await channel.send(formatToolPart(part));
         }
       } else if (part.type === "step-finish" && messageID) {
