@@ -4,7 +4,7 @@
   "type": "module",
   "module": "index.ts",
   "scripts": {
-    "bot": "src/index.ts"
+    "bot": "bun src/index.ts"
   },
   "dependencies": {
     "@opencode-ai/sdk": "^1.14.48",

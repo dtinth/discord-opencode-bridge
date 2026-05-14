@@ -39,6 +39,32 @@ function startEventListener(
 const threadUsers = new Map<string, string>();
 const announcedToolParts = new Set<string>();
 
+// Part buffer: messageID → partID → Part
+const partBuffer = new Map<string, Map<string, Part>>();
+const sseSubscriptions = new Map<string, AbortController>();
+
+function getPart(event: OpenCodeEvent): Part | undefined {
+  return event.properties?.part ?? event.part;
+}
+
+function shouldSendPart(part: Part, force: boolean): boolean {
+  if (part.type === "step-start" || part.type === "step-finish") return false;
+  if (part.type === "tool" && part.state?.status === "pending") return false;
+  if (!force && part.type === "text" && !part.time?.end) return false;
+  if (!force && part.type === "tool" && part.state?.status === "completed") return false;
+  return true;
+}
+
+function storePart(part: Part, messageID: string): void {
+  if (!part.id) return;
+  let messageParts = partBuffer.get(messageID);
+  if (!messageParts) {
+    messageParts = new Map();
+    partBuffer.set(messageID, messageParts);
+  }
+  messageParts.set(part.id, part);
+}
+
 export async function startBot() {
   const { db } = createDb(envConfig.databasePath);
   const channels = await db.select().from(schema.channelConfigs);
@@ -51,8 +77,6 @@ export async function startBot() {
     ],
   });
 
-  const sseSubscriptions = new Map<string, AbortController>();
-
   client.once(Events.ClientReady, async (c) => {
     log.info(`Bot ready as ${c.user.tag}`);
 
@@ -61,19 +85,7 @@ export async function startBot() {
       const key = `${ch.serverUrl}|${ch.directory}`;
       if (seenPairs.has(key)) continue;
       seenPairs.add(key);
-
-      const cfg: ChannelConfig = ch;
-      const ac = new AbortController();
-
-      startEventListener(
-        cfg,
-        async (event) => {
-          await handleEvent(db, client, event);
-        },
-        ac.signal,
-      );
-
-      sseSubscriptions.set(key, ac);
+      ensureEventListener(db, client, ch);
     }
 
     process.on("SIGINT", () => {
@@ -224,7 +236,55 @@ function buildInitialPrompt(client: Client, threadId: string, messages: Message[
   return `${formatSystemPreamble(client, threadId)}\n${formatUserMessages(messages)}`;
 }
 
+function formatFooter(info: Record<string, unknown>): string | undefined {
+  const modelID = info.modelID as string | undefined;
+  const finish = info.finish as string | undefined;
+  const role = info.role as string | undefined;
+  if (role !== "assistant" || finish === "tool-calls" || !modelID) return;
+  return `*${modelID}*`;
+}
+
+function ensureEventListener(db: Db, client: Client, cfg: ChannelConfig): void {
+  const key = `${cfg.serverUrl}|${cfg.directory}`;
+  if (sseSubscriptions.has(key)) return;
+  const ac = new AbortController();
+  startEventListener(
+    cfg,
+    async (event) => {
+      await handleEvent(db, client, event);
+    },
+    ac.signal,
+  );
+  sseSubscriptions.set(key, ac);
+}
+
+async function flushBufferedParts(
+  channel: { send: (content: string) => Promise<unknown> },
+  messageID: string,
+  force: boolean,
+  skipPartId?: string,
+): Promise<void> {
+  const messageParts = partBuffer.get(messageID);
+  if (!messageParts) return;
+
+  const toDelete: string[] = [];
+  for (const [partId, part] of messageParts) {
+    if (skipPartId && partId === skipPartId) continue;
+    if (!shouldSendPart(part, force)) continue;
+    if (part.type === "text") {
+      const text = (part.text ?? "").trim();
+      if (text) await channel.send(`⬥ ${text}`);
+    } else if (part.type === "tool") {
+      await channel.send(formatToolPart(part));
+    }
+    toDelete.push(partId);
+  }
+  for (const id of toDelete) messageParts.delete(id);
+  if (messageParts.size === 0) partBuffer.delete(messageID);
+}
+
 async function handleChannelMention(db: Db, client: Client, msg: Message, cfg: ChannelConfig) {
+  ensureEventListener(db, client, cfg);
   log.debug("creating thread");
   const thread = await msg.startThread({
     name: `OpenCode — ${msg.content.slice(0, 80)}`,
@@ -256,6 +316,7 @@ async function handleThreadMentionNewSession(
   msg: Message,
   cfg: ChannelConfig,
 ) {
+  ensureEventListener(db, client, cfg);
   log.debug("fetching recent messages for context");
   const messages = await msg.channel.messages.fetch({ limit: 100 });
   const collected: Message[] = [];
@@ -289,6 +350,7 @@ async function handleThreadMessage(
   cfg: ChannelConfig,
   ts: typeof schema.threadSessions.$inferSelect,
 ) {
+  ensureEventListener(db, client, cfg);
   if (!isBotMentioned(msg, client)) {
     log.debug("bot not mentioned, skipping");
     return;
@@ -326,10 +388,6 @@ function getSessionId(event: OpenCodeEvent): string | undefined {
   return event.sessionID ?? event.properties?.sessionID;
 }
 
-function getPart(event: OpenCodeEvent): Part | undefined {
-  return event.properties?.part ?? event.part;
-}
-
 async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
   const sessionId = getSessionId(event);
   if (!sessionId) {
@@ -365,20 +423,37 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
     case "message.part.updated": {
       const part = getPart(event);
       if (!part) break;
+
+      const messageID = part.messageID;
+      if (messageID && part.id) storePart(part, messageID);
+
       if (part.type === "text" && part.time?.end) {
         const text = (part.text ?? "").trim();
         if (text) await channel.send(`⬥ ${text}`);
-      } else {
-        showTyping();
-      }
-      if (part.type === "tool" && part.state?.status === "running") {
+      } else if (part.type === "tool" && part.state?.status === "running") {
+        if (messageID) await flushBufferedParts(channel, messageID, true, part.id);
         if (part.id) {
           const key = `${sessionId}-${part.id}`;
           if (announcedToolParts.has(key)) break;
           announcedToolParts.add(key);
+          await channel.send(formatToolPart(part));
         }
-        await channel.send(formatToolPart(part));
+      } else if (part.type === "step-finish" && messageID) {
+        await flushBufferedParts(channel, messageID, true);
+      } else {
+        showTyping();
       }
+      break;
+    }
+    case "message.updated": {
+      const info = event.properties?.info as Record<string, unknown> | undefined;
+      if (!info) break;
+
+      const infoId = info.id as string | undefined;
+      if (infoId) await flushBufferedParts(channel, infoId, false);
+
+      const footer = formatFooter(info);
+      if (footer) await channel.send(footer);
       break;
     }
     case "permission.asked": {
