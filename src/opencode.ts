@@ -85,7 +85,7 @@ export interface Part {
   time?: { end?: string };
   name?: string;
   tool?: string;
-  state?: { status?: string; input?: Record<string, unknown> };
+  state?: { status?: string; title?: string; input?: Record<string, unknown> };
   messageID?: string;
   sessionID?: string;
 }
