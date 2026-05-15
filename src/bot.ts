@@ -397,9 +397,11 @@ async function handleThreadMentionNewSession(
 
   const sessionId = await createSession(cfg);
 
+  const parentChannelId = msg.channel.isThread?.() ? msg.channel.parentId : msg.channelId;
+
   await db.insert(schema.threadSessions).values({
     threadId: msg.channelId,
-    channelId: msg.channelId,
+    channelId: parentChannelId ?? msg.channelId,
     sessionId,
     lastSentMessageId: msg.id,
   });
