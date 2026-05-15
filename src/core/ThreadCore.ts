@@ -1,11 +1,26 @@
 import type { Part } from "../opencode";
 
+export interface FileAttachment {
+  name: string;
+  content: Buffer;
+}
+
+export type FileFetchResult =
+  | { ok: true; file: FileAttachment }
+  | { ok: false; path: string; error: string };
+
 export interface ThreadCoreDelegate {
-  sendMessage(requestId: string, channelId: string, content: string): void;
+  sendMessage(
+    requestId: string,
+    channelId: string,
+    content: string,
+    attachments?: FileAttachment[],
+  ): void;
   editMessage(channelId: string, messageId: string, content: string): void;
   setTimer(timerId: string, ms: number): void;
   clearTimer(timerId: string): void;
   showTyping(): void;
+  fetchFile(path: string, onResult: (result: FileFetchResult) => void): void;
 }
 
 export interface OpenCodeEvent {
@@ -152,14 +167,7 @@ export class ThreadCore {
   }
 
   private flushDeferredText(messageID: string): void {
-    const deferred = this.deferredTexts.get(messageID);
-    if (!deferred) return;
-    this.deferredTexts.delete(messageID);
-    this.delegate.clearTimer(messageID);
-    const content = `⬥ ${deferred.text}`;
-    const reqId = `req_${++this.requestCounter}`;
-    this.delegate.sendMessage(reqId, this.channelId, content);
-    this.pendingEdits.set(reqId, { messageID, content });
+    this.sendDeferredWithAttachments(messageID);
   }
 
   handleOpenCodeEvent(event: OpenCodeEvent): void {
@@ -202,18 +210,12 @@ export class ThreadCore {
         const footer = formatFooter(info);
         if (footer) {
           this.cleanupPendingForMessage(infoId);
-          this.deferredTexts.delete(infoId);
-          this.delegate.clearTimer(infoId);
-          const reqId = `req_${++this.requestCounter}`;
-          this.delegate.sendMessage(reqId, this.channelId, `⬥ ${deferred.text} — ${footer}`);
+          this.sendDeferredWithAttachments(infoId, (cleanText) => `⬥ ${cleanText} — ${footer}`);
           return;
         }
         if (info.finish === "tool-calls") {
           this.cleanupPendingForMessage(infoId);
-          this.deferredTexts.delete(infoId);
-          this.delegate.clearTimer(infoId);
-          const reqId = `req_${++this.requestCounter}`;
-          this.delegate.sendMessage(reqId, this.channelId, `⬥ ${deferred.text}`);
+          this.sendDeferredWithAttachments(infoId);
           return;
         }
         return;
@@ -236,13 +238,75 @@ export class ThreadCore {
   }
 
   handleTimerExpired(timerId: string): void {
-    const deferred = this.deferredTexts.get(timerId);
+    this.sendDeferredWithAttachments(timerId);
+  }
+
+  private parseAttachmentTags(text: string): { cleanText: string; paths: string[] } {
+    const paths: string[] = [];
+    const cleanText = text.replace(
+      /<discord-attach>([^<]+)<\/discord-attach>/g,
+      (_match, path: string) => {
+        paths.push(path);
+        return `📎 ${path}`;
+      },
+    );
+    return { cleanText, paths };
+  }
+
+  private sendDeferredWithAttachments(
+    messageID: string,
+    decorator?: (cleanText: string) => string,
+  ): void {
+    const deferred = this.deferredTexts.get(messageID);
     if (!deferred) return;
-    this.deferredTexts.delete(timerId);
-    const content = `⬥ ${deferred.text}`;
+    this.deferredTexts.delete(messageID);
+    this.delegate.clearTimer(messageID);
+
+    const { cleanText, paths } = this.parseAttachmentTags(deferred.text);
+    const content = decorator ? decorator(cleanText) : `⬥ ${cleanText}`;
     const reqId = `req_${++this.requestCounter}`;
     this.delegate.sendMessage(reqId, this.channelId, content);
-    this.pendingEdits.set(reqId, { messageID: timerId, content });
+    this.pendingEdits.set(reqId, { messageID, content });
+
+    if (paths.length > 0) {
+      this.startAttachmentBatch(this.channelId, paths);
+    }
+  }
+
+  private startAttachmentBatch(channelId: string, paths: string[]): void {
+    const total = paths.length;
+    let completed = 0;
+    const results: FileFetchResult[] = new Array(total);
+
+    for (let i = 0; i < total; i++) {
+      const index = i;
+      const path: string = paths[i]!;
+      this.delegate.fetchFile(path, (result) => {
+        results[index] = result;
+        completed++;
+        if (completed === total) {
+          this.sendAttachmentResults(channelId, results);
+        }
+      });
+    }
+  }
+
+  private sendAttachmentResults(channelId: string, results: FileFetchResult[]): void {
+    const okFiles: FileAttachment[] = [];
+    const lines: string[] = [];
+
+    for (const r of results) {
+      if (r.ok) {
+        okFiles.push(r.file);
+        lines.push(`✅ ${r.file.name}`);
+      } else {
+        lines.push(`⚠️ ${r.path}: ${r.error}`);
+      }
+    }
+
+    const text = `📎 ${lines.join("\n")}`;
+    const reqId = `req_${++this.requestCounter}`;
+    this.delegate.sendMessage(reqId, channelId, text, okFiles);
   }
 
   handleDiscordMessageCreated(requestId: string, messageId: string): void {
