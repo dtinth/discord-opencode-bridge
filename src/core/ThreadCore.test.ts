@@ -249,6 +249,41 @@ describe("ThreadCore", () => {
       expect(attachMsg!.content).toContain("⚠️ missing.ts: File not found");
     });
 
+    test("11 files split into 2 messages (10 + 1)", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      const tags = Array.from(
+        { length: 11 },
+        (_, i) => `<discord-attach>file${i}.ts</discord-attach>`,
+      );
+      t.dispatchOpenCodeEvent(textPart(tags.join(" "), "m1"));
+      t.advanceTime();
+
+      expect(t.fileFetches).toHaveLength(11);
+      t.resolveAllFileFetches(true);
+
+      const attachMsgs = t.sentMessages.filter((m) => m.content.startsWith("📎"));
+      expect(attachMsgs).toHaveLength(2);
+      expect(attachMsgs[0]!.attachments).toHaveLength(10);
+      expect(attachMsgs[1]!.attachments).toHaveLength(1);
+    });
+
+    test("exactly 10 files sent in single message", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      const tags = Array.from(
+        { length: 10 },
+        (_, i) => `<discord-attach>file${i}.ts</discord-attach>`,
+      );
+      t.dispatchOpenCodeEvent(textPart(tags.join(" "), "m1"));
+      t.advanceTime();
+      t.resolveAllFileFetches(true);
+
+      const attachMsgs = t.sentMessages.filter((m) => m.content.startsWith("📎"));
+      expect(attachMsgs).toHaveLength(1);
+      expect(attachMsgs[0]!.attachments).toHaveLength(10);
+    });
+
     test("mixed success and failure: ok files attached, errors reported in text", () => {
       const t = new ThreadCoreTester("ch_1");
 

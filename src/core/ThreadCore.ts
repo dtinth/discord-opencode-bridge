@@ -292,6 +292,13 @@ export class ThreadCore {
   }
 
   private sendAttachmentResults(channelId: string, results: FileFetchResult[]): void {
+    const chunkSize = 10;
+    for (let i = 0; i < results.length; i += chunkSize) {
+      this.sendAttachmentChunk(channelId, results.slice(i, i + chunkSize));
+    }
+  }
+
+  private sendAttachmentChunk(channelId: string, results: FileFetchResult[]): void {
     const okFiles: FileAttachment[] = [];
     const lines: string[] = [];
 
