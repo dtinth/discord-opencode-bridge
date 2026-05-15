@@ -2,6 +2,32 @@ function basicAuth(password: string): string {
   return `Basic ${btoa(`opencode:${password}`)}`;
 }
 
+export interface FileContent {
+  type: "text" | "binary";
+  content: string;
+  encoding?: "base64";
+  mimeType?: string;
+}
+
+export async function getFileContent(
+  cfg: ChannelConfig,
+  path: string,
+): Promise<{ name: string; content: Buffer }> {
+  const url = new URL(`/file/content?path=${encodeURIComponent(path)}`, cfg.serverUrl).href;
+  const res = await fetch(url, { headers: headers(cfg) });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || res.statusText);
+  }
+  const data = (await res.json()) as FileContent;
+  const name = path.split("/").pop() || path;
+  const rawContent =
+    data.encoding === "base64"
+      ? Buffer.from(data.content, "base64")
+      : Buffer.from(data.content, "utf-8");
+  return { name, content: rawContent };
+}
+
 export interface ChannelConfig {
   channelId: string;
   serverUrl: string;

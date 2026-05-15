@@ -12,6 +12,7 @@ import { config as envConfig } from "./config";
 import { log } from "./debug";
 import {
   createSession,
+  getFileContent,
   promptAsync,
   subscribe,
   type ChannelConfig,
@@ -49,6 +50,7 @@ function coreForSession(
   channelId: string,
   client: Client,
   threadId: string,
+  cfg: ChannelConfig,
 ): ThreadCore {
   let core = sessionCores.get(sessionId);
   if (core) return core;
@@ -56,13 +58,20 @@ function coreForSession(
   let lastTypingTime = 0;
   const coreRef = { current: null as ThreadCore | null };
   const delegate: ThreadCoreDelegate = {
-    sendMessage: (reqId, _ch, content) => {
+    sendMessage: (reqId, _ch, content, attachments) => {
       client.channels
         .fetch(threadId)
         .then((ch) => {
           if (ch?.isTextBased() && ch.isSendable()) {
-            (ch as { send: (c: string) => Promise<{ id: string }> })
-              .send(content)
+            const sendOpts: Record<string, unknown> = { content };
+            if (attachments && attachments.length > 0) {
+              sendOpts.files = attachments.map((a) => ({
+                attachment: a.content,
+                name: a.name,
+              }));
+            }
+            (ch as { send: (opts: Record<string, unknown>) => Promise<{ id: string }> })
+              .send(sendOpts)
               .then((sent) => {
                 coreRef.current?.handleDiscordMessageCreated(reqId, sent.id);
               })
@@ -70,6 +79,15 @@ function coreForSession(
           }
         })
         .catch((err) => log.error("fetch error", err));
+    },
+    fetchFile: (path, onResult) => {
+      getFileContent(cfg, path)
+        .then((file) => {
+          onResult({ ok: true, file });
+        })
+        .catch((err) => {
+          onResult({ ok: false, path, error: err.message ?? String(err) });
+        });
     },
     editMessage: (_ch, msgId, content) => {
       client.channels
@@ -277,6 +295,10 @@ The bot's user ID is <@${client.user!.id}>.
 You are in Discord thread ID ${threadId}.
 When you receive new messages, pay attention to the message that mentioned you first, then use the earlier messages as supporting context.
 When replying, tag the user who mentioned you using the <@userId> format so they get notified.
+
+To share files back to the user, use the <discord-attach>path</discord-attach> tag in your response.
+The bridge will fetch the file from the filesystem and send it as a Discord attachment.
+Example: "Here is the file you requested: <discord-attach>src/main.ts</discord-attach>"
 </discord-harness>`;
 }
 
@@ -440,17 +462,27 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
   }
   log.debug("event", event.type, "session", sessionId, "thread", ts.threadId);
 
+  const cfgRaw = await db
+    .select()
+    .from(schema.channelConfigs)
+    .where(eq(schema.channelConfigs.channelId, ts.channelId))
+    .get();
+  if (!cfgRaw) {
+    log.debug("no channel config for", ts.channelId);
+    return;
+  }
+  const cfg: ChannelConfig = cfgRaw;
   const channel = await client.channels.fetch(ts.threadId);
   if (!channel?.isTextBased()) return;
   if (!channel.isSendable()) return;
 
   if (event.type === "message.part.updated") {
-    const core = coreForSession(sessionId, ts.channelId, client, ts.threadId);
+    const core = coreForSession(sessionId, ts.channelId, client, ts.threadId, cfg);
     core.handleOpenCodeEvent(event);
     return;
   }
   if (event.type === "message.updated") {
-    const core = coreForSession(sessionId, ts.channelId, client, ts.threadId);
+    const core = coreForSession(sessionId, ts.channelId, client, ts.threadId, cfg);
     core.handleOpenCodeEvent(event);
     return;
   }

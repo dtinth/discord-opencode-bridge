@@ -32,6 +32,8 @@ A Discord thread created from a channel message. Mapped one-to-one with an OpenC
 - A **Thread** delivers messages to a **Session** only when the bot is **Mentioned**; unmentioned messages are ignored
 - The bridge wraps all **Session** prompts in a **Discord Harness**
 
+The model is instructed that it can output `<discord-attach>path</discord-attach>` tags to share files back to Discord users. The bridge fetches those files from the OpenCode server and sends them as Discord attachments.
+
 **Discord Harness**:
 A `<discord-harness>` XML block wrapper for messages sent into OpenCode. Each block contains structured message metadata (user id, displayName) so the agent can identify and respond to users. The initial prompt includes a system preamble block; subsequent prompts include one or more message blocks.
 _Avoid_: Raw text, unstructured prompt
@@ -41,6 +43,18 @@ The rule that the bot only delivers thread messages to the **Session** when the 
 
 **User Message Metadata**:
 JSON-encoded message data per Discord message: `{"user":{"id":"…","displayName":"…"},"content":"…"}`. One message per line inside a `Discord Harness` block.
+
+**Discord Attach Tag**:
+An XML tag `<discord-attach>path</discord-attach>` that the model can place in its text output. When the bridge detects this tag, it fetches the file at `path` from the OpenCode server and sends it as a Discord file attachment. The tag is replaced with `📎 path` in the displayed text. Multiple tags in one response are batched into a single attachment message.
+_Avoid_: MyST syntax, markdown link interception
+
+**File Attachment**:
+A file fetched from the OpenCode server (via `GET /file/content?path=…`) and sent as a Discord attachment. Sent as a follow-up message with a summary of which files were successfully fetched and any errors.
+_Avoid_: Inline code blocks
+
+## Flagged ambiguities
+
+- "attachment" was used to mean both Discord attachment uploads and the act of fetching files — resolved: **File Attachment** is the result; **Discord Attach Tag** is the trigger.
 
 ## Example dialogue
 
