@@ -59,6 +59,9 @@ function coreForSession(
   const coreRef = { current: null as ThreadCore | null };
   const delegate: ThreadCoreDelegate = {
     sendMessage: (reqId, _ch, content, attachments) => {
+      const fileInfo =
+        attachments && attachments.length > 0 ? ` (${attachments.length} file(s))` : "";
+      log.info(`sending to discord [${reqId}]${fileInfo}: ${content.slice(0, 120)}`);
       client.channels
         .fetch(threadId)
         .then((ch) => {
@@ -73,23 +76,30 @@ function coreForSession(
             (ch as { send: (opts: Record<string, unknown>) => Promise<{ id: string }> })
               .send(sendOpts)
               .then((sent) => {
+                log.info(`sent to discord [${reqId}] => ${sent.id}`);
                 coreRef.current?.handleDiscordMessageCreated(reqId, sent.id);
               })
-              .catch((err) => log.error("send error", err));
+              .catch((err) => log.error("discord send failed", err));
+          } else {
+            log.warn("channel not sendable", threadId);
           }
         })
-        .catch((err) => log.error("fetch error", err));
+        .catch((err) => log.error("discord channel fetch failed", err));
     },
     fetchFile: (path, onResult) => {
+      log.info(`fetching file: ${path}`);
       getFileContent(cfg, path)
         .then((file) => {
+          log.info(`file fetched: ${path} (${file.content.length} bytes)`);
           onResult({ ok: true, file });
         })
         .catch((err) => {
+          log.warn(`file fetch failed: ${path}`, err.message ?? String(err));
           onResult({ ok: false, path, error: err.message ?? String(err) });
         });
     },
     editMessage: (_ch, msgId, content) => {
+      log.info(`editing discord message ${msgId}: ${content.slice(0, 120)}`);
       client.channels
         .fetch(threadId)
         .then((ch) => {
@@ -103,12 +113,12 @@ function coreForSession(
             ).messages
               .fetch(msgId)
               .then((msg) => {
-                msg.edit(content).catch((err) => log.error("edit error", err));
+                msg.edit(content).catch((err) => log.error("discord edit failed", err));
               })
-              .catch((err) => log.error("fetch msg error", err));
+              .catch((err) => log.error("discord msg fetch failed", err));
           }
         })
-        .catch((err) => log.error("fetch error", err));
+        .catch((err) => log.error("discord channel fetch failed", err));
     },
     setTimer: (timerId, ms) => {
       const timer = setTimeout(() => {
@@ -426,7 +436,9 @@ async function handleThreadMessage(
     log.debug("no new messages to send");
     return;
   }
-  log.debug("collected", collected.length, "messages");
+  log.info(
+    `collected ${collected.length} message(s) from thread ${msg.channelId} for session ${ts.sessionId} (user ${msg.author.displayName})`,
+  );
 
   const promptText = formatUserMessages(collected);
 
