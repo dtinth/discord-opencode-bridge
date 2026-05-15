@@ -62,7 +62,7 @@ function formatToolPart(part: {
       : tool === "edit" || tool === "write" || tool === "apply_patch"
         ? "◼︎"
         : "┣";
-  const description = part.state?.title || "";
+  const description = part.state?.title || (input as Record<string, string>)?.description || "";
   if (tool === "edit") {
     const filePath = String(input.filePath ?? input.file ?? "");
     const added = String(
