@@ -476,19 +476,21 @@ async function handleEvent(db: Db, client: Client, event: OpenCodeEvent) {
   }
   log.debug("event", event.type, "session", sessionId, "thread", ts.threadId);
 
-  const cfgRaw = await db
-    .select()
-    .from(schema.channelConfigs)
-    .where(eq(schema.channelConfigs.channelId, ts.channelId))
-    .get();
-  if (!cfgRaw) {
-    log.debug("no channel config for", ts.channelId);
-    return;
-  }
-  const cfg: ChannelConfig = cfgRaw;
   const channel = await client.channels.fetch(ts.threadId);
   if (!channel?.isTextBased()) return;
   if (!channel.isSendable()) return;
+
+  const configChannelId = channel.isThread() && channel.parentId ? channel.parentId : ts.channelId;
+  const cfgRaw = await db
+    .select()
+    .from(schema.channelConfigs)
+    .where(eq(schema.channelConfigs.channelId, configChannelId))
+    .get();
+  if (!cfgRaw) {
+    log.debug("no channel config for", configChannelId);
+    return;
+  }
+  const cfg: ChannelConfig = cfgRaw;
 
   if (event.type === "message.part.updated") {
     const core = coreForSession(sessionId, ts.channelId, client, ts.threadId, cfg);
