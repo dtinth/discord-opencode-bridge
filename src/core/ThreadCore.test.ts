@@ -45,25 +45,20 @@ describe("ThreadCore", () => {
 
     t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
     expect(t.sentMessages).toContainEqual({
-      requestId: expect.any(String),
       content: "⬥ Hello — *gpt-4*",
     });
   });
 
-  test("deferred text + time passes before message.updated → send then edit", () => {
+  test("deferred text + time passes before message.updated → send then send footer separately", () => {
     const t = new ThreadCoreTester("ch_1");
 
     t.dispatchOpenCodeEvent(textPart("Hello", "m1"));
     t.advanceTime();
 
     expect(t.sentMessages[0]?.content).toBe("⬥ Hello");
-    t.messageCreated(t.sentMessages[0]!.requestId, "discord_1");
 
     t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 500));
-    expect(t.editedMessages).toContainEqual({
-      messageId: "discord_1",
-      content: "⬥ Hello — *gpt-4*",
-    });
+    expect(t.sentMessages[1]?.content).toBe("— *gpt-4*");
   });
 
   test("tool running flushes deferred text before sending tool notification", () => {
@@ -74,9 +69,8 @@ describe("ThreadCore", () => {
 
     t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1"));
 
-    expect(t.sentMessages).toContainEqual({ requestId: expect.any(String), content: "⬥ Hello" });
+    expect(t.sentMessages).toContainEqual({ content: "⬥ Hello" });
     expect(t.sentMessages).toContainEqual({
-      requestId: expect.any(String),
       content: expect.stringContaining("bash"),
     });
   });
@@ -95,7 +89,6 @@ describe("ThreadCore", () => {
     });
 
     expect(t.sentMessages).toContainEqual({
-      requestId: expect.any(String),
       content: expect.stringContaining("bash"),
     });
   });
@@ -122,16 +115,12 @@ describe("ThreadCore", () => {
 
     t.dispatchOpenCodeEvent(textPart("Hello", "m1"));
 
-    // Intermediate update: finish set but no time.completed
     t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop"));
 
-    // Text should NOT have been sent yet — still waiting for time.completed
     expect(t.sentMessages).toEqual([]);
 
-    // Final update with time.completed
     t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 500));
     expect(t.sentMessages).toContainEqual({
-      requestId: expect.any(String),
       content: "⬥ Hello — *gpt-4*",
     });
   });
@@ -142,12 +131,35 @@ describe("ThreadCore", () => {
     t.dispatchOpenCodeEvent(textPart("First", "m1", "p1"));
     t.dispatchOpenCodeEvent(textPart("Second", "m1", "p2"));
 
-    expect(t.sentMessages).toContainEqual({ requestId: expect.any(String), content: "⬥ First" });
+    expect(t.sentMessages).toContainEqual({ content: "⬥ First" });
 
     t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
     expect(t.sentMessages).toContainEqual({
-      requestId: expect.any(String),
       content: "⬥ Second — *gpt-4*",
+    });
+  });
+
+  describe("message splitting", () => {
+    test("long text part is split into multiple messages", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      // A part longer than 2000 chars
+      t.dispatchOpenCodeEvent(textPart("x".repeat(2500), "m1"));
+      t.advanceTime();
+
+      expect(t.sentMessages.length).toBeGreaterThan(1);
+      const allContent = t.sentMessages.map((m) => m.content).join("");
+      expect(allContent).toBe("⬥ " + "x".repeat(2500));
+    });
+
+    test("chunks are sent in order", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(textPart("abcde", "m1"));
+      t.advanceTime();
+
+      expect(t.sentMessages).toHaveLength(1);
+      expect(t.sentMessages[0]?.content).toBe("⬥ abcde");
     });
   });
 
@@ -157,16 +169,13 @@ describe("ThreadCore", () => {
 
       t.dispatchOpenCodeEvent(textPartWithAttach("Some text", "src/foo.ts", "m1"));
 
-      // Tag is replaced in the text message
-      expect(t.sentMessages).toHaveLength(0); // still deferred
+      expect(t.sentMessages).toHaveLength(0);
 
       t.advanceTime();
 
       expect(t.sentMessages).toContainEqual({
-        requestId: expect.any(String),
         content: "⬥ Some text 📎 src/foo.ts more text",
       });
-      // File fetch should have been initiated
       expect(t.fileFetches).toContainEqual({ path: "src/foo.ts" });
     });
 
@@ -177,7 +186,6 @@ describe("ThreadCore", () => {
       t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
 
       expect(t.sentMessages).toContainEqual({
-        requestId: expect.any(String),
         content: "⬥ Some text 📎 src/foo.ts more text — *gpt-4*",
       });
       expect(t.fileFetches).toContainEqual({ path: "src/foo.ts" });
@@ -189,13 +197,11 @@ describe("ThreadCore", () => {
       t.dispatchOpenCodeEvent(textPartWithAttach("Some text", "src/foo.ts", "m1"));
       t.advanceTime();
 
-      // Resolve the file fetch
       t.resolveFileFetch("src/foo.ts", {
         ok: true,
         file: { name: "foo.ts", content: Buffer.from("export const x = 1;") },
       });
 
-      // Should have sent an attachment message
       const attachMsg = t.sentMessages.find((m) => m.content.startsWith("📎"));
       expect(attachMsg).toBeDefined();
       expect(attachMsg!.attachments).toHaveLength(1);
@@ -214,7 +220,6 @@ describe("ThreadCore", () => {
 
       expect(t.fileFetches).toHaveLength(2);
 
-      // Resolve both fetches
       t.resolveFileFetch("a.ts", {
         ok: true,
         file: { name: "a.ts", content: Buffer.from("// a") },

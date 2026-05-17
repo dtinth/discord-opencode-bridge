@@ -1,4 +1,5 @@
 import type { Part } from "../opencode";
+import { splitContent } from "./splitContent";
 
 export interface FileAttachment {
   name: string;
@@ -9,14 +10,15 @@ export type FileFetchResult =
   | { ok: true; file: FileAttachment }
   | { ok: false; path: string; error: string };
 
+export interface SendMessageOptions {
+  channelId: string;
+  content: string;
+  attachments?: FileAttachment[];
+  onSent?: () => void;
+}
+
 export interface ThreadCoreDelegate {
-  sendMessage(
-    requestId: string,
-    channelId: string,
-    content: string,
-    attachments?: FileAttachment[],
-  ): void;
-  editMessage(channelId: string, messageId: string, content: string): void;
+  sendMessage(options: SendMessageOptions): void;
   setTimer(timerId: string, ms: number): void;
   clearTimer(timerId: string): void;
   showTyping(): void;
@@ -43,10 +45,6 @@ export function formatFooter(info: Record<string, unknown>): string | undefined 
 function getPart(event: OpenCodeEvent): Part | undefined {
   const props = event.properties as Record<string, unknown> | undefined;
   return (props?.part as Part | undefined) ?? event.part;
-}
-
-function addFooter(content: string, footer: string): string {
-  return `${content} — ${footer}`;
 }
 
 function formatToolPart(part: {
@@ -106,12 +104,9 @@ export class ThreadCore {
   private channelId: string;
   private delegate: ThreadCoreDelegate;
   private deferredTexts = new Map<string, { text: string }>();
-  private lastTextMessages = new Map<string, { messageId: string; content: string }>();
-  private pendingEdits = new Map<string, { messageID: string; content: string }>();
   private announcedToolParts = new Set<string>();
   private sentRunningToolPartIds = new Set<string>();
   private partBuffer = new Map<string, Map<string, Part>>();
-  private requestCounter = 0;
 
   constructor(channelId: string, delegate: ThreadCoreDelegate) {
     this.channelId = channelId;
@@ -149,21 +144,12 @@ export class ThreadCore {
           toDelete.push(partId);
           continue;
         }
-        const reqId = `req_${++this.requestCounter}`;
-        this.delegate.sendMessage(reqId, this.channelId, formatToolPart(part));
+        this.sendContent(formatToolPart(part));
       }
       toDelete.push(partId);
     }
     for (const id of toDelete) messageParts.delete(id);
     if (messageParts.size === 0) this.partBuffer.delete(messageID);
-  }
-
-  private cleanupPendingForMessage(messageID: string): void {
-    for (const [reqId, entry] of this.pendingEdits) {
-      if (entry.messageID === messageID) {
-        this.pendingEdits.delete(reqId);
-      }
-    }
   }
 
   private flushDeferredText(messageID: string): void {
@@ -183,8 +169,7 @@ export class ThreadCore {
         if (part.id && !this.announcedToolParts.has(part.id)) {
           this.announcedToolParts.add(part.id);
           this.sentRunningToolPartIds.add(part.id);
-          const reqId = `req_${++this.requestCounter}`;
-          this.delegate.sendMessage(reqId, this.channelId, formatToolPart(part));
+          this.sendContent(formatToolPart(part));
         }
       } else if (
         part.type === "tool" &&
@@ -206,33 +191,22 @@ export class ThreadCore {
       if (!infoId) return;
 
       const deferred = this.deferredTexts.get(infoId);
+      const footer = formatFooter(info);
+
       if (deferred) {
-        const footer = formatFooter(info);
         if (footer) {
-          this.cleanupPendingForMessage(infoId);
-          this.sendDeferredWithAttachments(infoId, (cleanText) => `⬥ ${cleanText} — ${footer}`);
+          this.sendDeferredWithAttachments(infoId, footer);
           return;
         }
         if (info.finish === "tool-calls") {
-          this.cleanupPendingForMessage(infoId);
           this.sendDeferredWithAttachments(infoId);
           return;
         }
         return;
       }
 
-      const previous = this.lastTextMessages.get(infoId);
-      if (previous) {
-        const footer = formatFooter(info);
-        if (footer) {
-          this.cleanupPendingForMessage(infoId);
-          this.lastTextMessages.delete(infoId);
-          this.delegate.editMessage(
-            this.channelId,
-            previous.messageId,
-            addFooter(previous.content, footer),
-          );
-        }
+      if (footer) {
+        this.sendContent(`— ${footer}`);
       }
     }
   }
@@ -253,24 +227,51 @@ export class ThreadCore {
     return { cleanText, paths };
   }
 
-  private sendDeferredWithAttachments(
-    messageID: string,
-    decorator?: (cleanText: string) => string,
-  ): void {
+  private sendDeferredWithAttachments(messageID: string, footer?: string): void {
     const deferred = this.deferredTexts.get(messageID);
     if (!deferred) return;
     this.deferredTexts.delete(messageID);
     this.delegate.clearTimer(messageID);
 
     const { cleanText, paths } = this.parseAttachmentTags(deferred.text);
-    const content = decorator ? decorator(cleanText) : `⬥ ${cleanText}`;
-    const reqId = `req_${++this.requestCounter}`;
-    this.delegate.sendMessage(reqId, this.channelId, content);
-    this.pendingEdits.set(reqId, { messageID, content });
+    const fullContent = footer ? `⬥ ${cleanText} — ${footer}` : `⬥ ${cleanText}`;
+    this.sendContent(fullContent, undefined, () => {
+      if (paths.length > 0) {
+        this.startAttachmentBatch(this.channelId, paths);
+      }
+    });
+  }
 
-    if (paths.length > 0) {
-      this.startAttachmentBatch(this.channelId, paths);
+  private sendContent(
+    content: string,
+    attachments?: FileAttachment[],
+    onAllSent?: () => void,
+  ): void {
+    const chunks = splitContent(content);
+    this.sendChunks(chunks, 0, attachments, onAllSent);
+  }
+
+  private sendChunks(
+    chunks: string[],
+    index: number,
+    attachments?: FileAttachment[],
+    onAllSent?: () => void,
+  ): void {
+    if (index >= chunks.length) {
+      onAllSent?.();
+      return;
     }
+    const chunk = chunks[index]!;
+    const isLast = index === chunks.length - 1;
+    const opts: SendMessageOptions = {
+      channelId: this.channelId,
+      content: chunk,
+    };
+    if (isLast && attachments) {
+      opts.attachments = attachments;
+    }
+    opts.onSent = () => this.sendChunks(chunks, index + 1, attachments, onAllSent);
+    this.delegate.sendMessage(opts);
   }
 
   private startAttachmentBatch(channelId: string, paths: string[]): void {
@@ -312,15 +313,6 @@ export class ThreadCore {
     }
 
     const text = `📎 ${lines.join("\n")}`;
-    const reqId = `req_${++this.requestCounter}`;
-    this.delegate.sendMessage(reqId, channelId, text, okFiles);
-  }
-
-  handleDiscordMessageCreated(requestId: string, messageId: string): void {
-    const entry = this.pendingEdits.get(requestId);
-    if (entry) {
-      this.pendingEdits.delete(requestId);
-      this.lastTextMessages.set(entry.messageID, { messageId, content: entry.content });
-    }
+    this.sendContent(text, okFiles);
   }
 }

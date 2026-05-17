@@ -19,7 +19,7 @@ import {
   type OpenCodeEvent,
   type Part,
 } from "./opencode";
-import { ThreadCore, type ThreadCoreDelegate } from "./core/ThreadCore";
+import { ThreadCore, type ThreadCoreDelegate, type SendMessageOptions } from "./core/ThreadCore";
 
 function startEventListener(
   cfg: ChannelConfig,
@@ -58,26 +58,27 @@ function coreForSession(
   let lastTypingTime = 0;
   const coreRef = { current: null as ThreadCore | null };
   const delegate: ThreadCoreDelegate = {
-    sendMessage: (reqId, _ch, content, attachments) => {
+    sendMessage: (opts: SendMessageOptions) => {
       const fileInfo =
-        attachments && attachments.length > 0 ? ` (${attachments.length} file(s))` : "";
-      log.info(`sending to discord [${reqId}]${fileInfo}: ${content.slice(0, 120)}`);
+        opts.attachments && opts.attachments.length > 0
+          ? ` (${opts.attachments.length} file(s))`
+          : "";
+      log.info(`sending to discord:${fileInfo} ${opts.content.slice(0, 120)}`);
       client.channels
         .fetch(threadId)
         .then((ch) => {
           if (ch?.isTextBased() && ch.isSendable()) {
-            const sendOpts: Record<string, unknown> = { content };
-            if (attachments && attachments.length > 0) {
-              sendOpts.files = attachments.map((a) => ({
+            const sendOpts: Record<string, unknown> = { content: opts.content };
+            if (opts.attachments && opts.attachments.length > 0) {
+              sendOpts.files = opts.attachments.map((a) => ({
                 attachment: a.content,
                 name: a.name,
               }));
             }
             (ch as { send: (opts: Record<string, unknown>) => Promise<{ id: string }> })
               .send(sendOpts)
-              .then((sent) => {
-                log.info(`sent to discord [${reqId}] => ${sent.id}`);
-                coreRef.current?.handleDiscordMessageCreated(reqId, sent.id);
+              .then(() => {
+                opts.onSent?.();
               })
               .catch((err) => log.error("discord send failed", err));
           } else {
@@ -97,28 +98,6 @@ function coreForSession(
           log.warn(`file fetch failed: ${path}`, err.message ?? String(err));
           onResult({ ok: false, path, error: err.message ?? String(err) });
         });
-    },
-    editMessage: (_ch, msgId, content) => {
-      log.info(`editing discord message ${msgId}: ${content.slice(0, 120)}`);
-      client.channels
-        .fetch(threadId)
-        .then((ch) => {
-          if (ch?.isTextBased()) {
-            (
-              ch as {
-                messages: {
-                  fetch: (id: string) => Promise<{ edit: (c: string) => Promise<unknown> }>;
-                };
-              }
-            ).messages
-              .fetch(msgId)
-              .then((msg) => {
-                msg.edit(content).catch((err) => log.error("discord edit failed", err));
-              })
-              .catch((err) => log.error("discord msg fetch failed", err));
-          }
-        })
-        .catch((err) => log.error("discord channel fetch failed", err));
     },
     setTimer: (timerId, ms) => {
       const timer = setTimeout(() => {

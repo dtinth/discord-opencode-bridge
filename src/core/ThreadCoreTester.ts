@@ -7,11 +7,9 @@ import {
 
 export class ThreadCoreTester {
   sentMessages: Array<{
-    requestId: string;
     content: string;
     attachments?: Array<{ name: string; content: Buffer }>;
   }> = [];
-  editedMessages: Array<{ messageId: string; content: string }> = [];
   fileFetches: Array<{ path: string }> = [];
   private timers = new Map<string, number>();
   private fileFetchHandlers = new Map<string, (result: FileFetchResult) => void>();
@@ -19,11 +17,9 @@ export class ThreadCoreTester {
 
   constructor(channelId: string) {
     const delegate: ThreadCoreDelegate = {
-      sendMessage: (reqId, _ch, content, attachments) => {
-        this.sentMessages.push({ requestId: reqId, content, attachments });
-      },
-      editMessage: (_ch, msgId, content) => {
-        this.editedMessages.push({ messageId: msgId, content });
+      sendMessage: (opts) => {
+        this.sentMessages.push({ content: opts.content, attachments: opts.attachments });
+        opts.onSent?.();
       },
       setTimer: (id, ms) => {
         this.timers.set(id, ms);
@@ -52,8 +48,8 @@ export class ThreadCoreTester {
     }
   }
 
-  messageCreated(requestId: string, messageId: string): void {
-    this.core.handleDiscordMessageCreated(requestId, messageId);
+  get pendingTimers(): number {
+    return this.timers.size;
   }
 
   resolveFileFetch(path: string, result: FileFetchResult): void {
