@@ -55,7 +55,7 @@ class ToolMessageRef implements MessageRef {
   private msgPromise: Promise<{ edit: (c: string) => Promise<unknown> } | null> | null = null;
 
   constructor(
-    private doSend: () => Promise<{ edit: (c: string) => Promise<unknown> }>,
+    private doSend: (content: string) => Promise<{ edit: (c: string) => Promise<unknown> }>,
     private onSent: (() => void) | undefined,
     content: string,
   ) {
@@ -68,7 +68,7 @@ class ToolMessageRef implements MessageRef {
     this.sent = true;
     const content = this.pendingContent ?? "";
     this.pendingContent = null;
-    this.msgPromise = this.doSend()
+    this.msgPromise = this.doSend(content)
       .then((msg) => {
         this.onSent?.();
         return msg;
@@ -110,10 +110,10 @@ function coreForSession(
           ? ` (${opts.attachments.length} file(s))`
           : "";
       log.info(`sending to discord:${fileInfo} ${(opts.content ?? "").slice(0, 120)}`);
-      const doSend = () =>
+      const doSend = (sendContent: string) =>
         client.channels.fetch(threadId).then((ch) => {
           if (ch?.isTextBased() && ch.isSendable()) {
-            const sendOpts: Record<string, unknown> = { content: opts.content ?? "" };
+            const sendOpts: Record<string, unknown> = { content: sendContent };
             if (opts.attachments && opts.attachments.length > 0) {
               sendOpts.files = opts.attachments.map((a) => ({
                 attachment: a.content,
