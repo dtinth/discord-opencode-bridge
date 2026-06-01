@@ -8,6 +8,7 @@ import {
 
 export class FakeMessageRef implements MessageRef {
   edits: string[] = [];
+  flushed = false;
   constructor(
     public content: string,
     private onEdit?: (content: string) => void,
@@ -15,6 +16,9 @@ export class FakeMessageRef implements MessageRef {
   edit(content: string): void {
     this.edits.push(content);
     this.onEdit?.(content);
+  }
+  flush(): void {
+    this.flushed = true;
   }
 }
 
@@ -25,23 +29,17 @@ export class ThreadCoreTester {
   }> = [];
   messageEdits: string[] = [];
   fileFetches: Array<{ path: string }> = [];
-  private timers = new Map<string, number>();
   private fileFetchHandlers = new Map<string, (result: FileFetchResult) => void>();
   private core: ThreadCore;
+  private pendingOnSent: (() => void)[] = [];
 
   constructor(channelId: string) {
     const delegate: ThreadCoreDelegate = {
       sendMessage: (opts) => {
         const ref = new FakeMessageRef(opts.content, (c) => this.messageEdits.push(c));
         this.sentMessages.push({ content: opts.content, attachments: opts.attachments });
-        opts.onSent?.();
+        if (opts.onSent) this.pendingOnSent.push(opts.onSent);
         return ref;
-      },
-      setTimer: (id, ms) => {
-        this.timers.set(id, ms);
-      },
-      clearTimer: (id) => {
-        this.timers.delete(id);
       },
       showTyping: () => {},
       fetchFile: (path, onResult) => {
@@ -54,24 +52,24 @@ export class ThreadCoreTester {
 
   dispatchOpenCodeEvent(event: OpenCodeEvent): void {
     this.core.handleOpenCodeEvent(event);
+    this.flushOnSent();
   }
 
-  advanceTime(): void {
-    const ids = [...this.timers.keys()];
-    this.timers.clear();
-    for (const id of ids) {
-      this.core.handleTimerExpired(id);
+  private flushOnSent(): void {
+    while (this.pendingOnSent.length > 0) {
+      const batch = this.pendingOnSent;
+      this.pendingOnSent = [];
+      for (const fn of batch) {
+        fn();
+      }
     }
-  }
-
-  get pendingTimers(): number {
-    return this.timers.size;
   }
 
   resolveFileFetch(path: string, result: FileFetchResult): void {
     const handler = this.fileFetchHandlers.get(path);
     if (handler) {
       handler(result);
+      this.flushOnSent();
     }
   }
 
@@ -87,5 +85,6 @@ export class ThreadCoreTester {
       }
     }
     this.fileFetchHandlers.clear();
+    this.flushOnSent();
   }
 }

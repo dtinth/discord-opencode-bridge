@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ThreadCoreTester, FakeMessageRef } from "./ThreadCoreTester";
+import { ThreadCoreTester } from "./ThreadCoreTester";
 
 function textPart(text: string, messageID: string, id = "p1") {
   return {
@@ -49,39 +49,36 @@ function messageUpdated(messageID: string, modelID: string, finish?: string, com
 }
 
 describe("ThreadCore", () => {
-  test("deferred text + message.updated before time passes → combined send", () => {
+  test("text sent immediately, message.updated edits to add footer", () => {
     const t = new ThreadCoreTester("ch_1");
 
     t.dispatchOpenCodeEvent(textPart("Hello", "m1"));
-    expect(t.sentMessages).toEqual([]);
+    expect(t.sentMessages).toContainEqual({ content: "⬥ Hello" });
 
     t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
-    expect(t.sentMessages).toContainEqual({
-      content: "⬥ Hello — *gpt-4*",
-    });
+    expect(t.messageEdits).toContain("⬥ Hello — *gpt-4*");
   });
 
-  test("deferred text + time passes before message.updated → send then send footer separately", () => {
+  test("message.updated without time.completed does not trigger edit", () => {
     const t = new ThreadCoreTester("ch_1");
 
     t.dispatchOpenCodeEvent(textPart("Hello", "m1"));
-    t.advanceTime();
 
-    expect(t.sentMessages[0]?.content).toBe("⬥ Hello");
+    t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop"));
+    expect(t.messageEdits).toHaveLength(0);
 
     t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 500));
-    expect(t.sentMessages[1]?.content).toBe("— *gpt-4*");
+    expect(t.messageEdits).toContain("⬥ Hello — *gpt-4*");
   });
 
-  test("tool running flushes deferred text before sending tool notification", () => {
+  test("tool after text sends text then starts tool group", () => {
     const t = new ThreadCoreTester("ch_1");
 
     t.dispatchOpenCodeEvent(textPart("Hello", "m1"));
-    expect(t.sentMessages).toEqual([]);
+    expect(t.sentMessages).toContainEqual({ content: "⬥ Hello" });
 
     t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1"));
 
-    expect(t.sentMessages).toContainEqual({ content: "⬥ Hello" });
     expect(t.sentMessages).toContainEqual({
       content: expect.stringContaining("bash"),
     });
@@ -96,59 +93,47 @@ describe("ThreadCore", () => {
     expect(t.sentMessages[0]!.content).toContain("bash");
   });
 
-  test("completed tool skipped if running was already announced", () => {
+  test("completed tool updates the line via edit instead of sending new message", () => {
     const t = new ThreadCoreTester("ch_1");
 
     t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
     t.dispatchOpenCodeEvent(toolPart("bash", "completed", "m1", "t1"));
-    expect(t.sentMessages).toHaveLength(1);
-
-    t.dispatchOpenCodeEvent({
-      type: "message.part.updated",
-      properties: {
-        part: { id: "sf1", type: "step-finish", reason: "tool-calls", messageID: "m1" },
-      },
-    });
 
     expect(t.sentMessages).toHaveLength(1);
+    expect(t.messageEdits).toHaveLength(1);
   });
 
-  test("intermediate message.updated without time.completed does not flush deferred text", () => {
+  test("intermediate message.updated without time.completed does not affect text", () => {
     const t = new ThreadCoreTester("ch_1");
 
     t.dispatchOpenCodeEvent(textPart("Hello", "m1"));
 
     t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop"));
 
-    expect(t.sentMessages).toEqual([]);
+    expect(t.sentMessages).toContainEqual({ content: "⬥ Hello" });
 
     t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 500));
-    expect(t.sentMessages).toContainEqual({
-      content: "⬥ Hello — *gpt-4*",
-    });
+    expect(t.messageEdits).toContain("⬥ Hello — *gpt-4*");
   });
 
-  test("multiple text parts flush previous deferred text before deferring new one", () => {
+  test("multiple text parts: first sent immediately, second flushes and replaces ref", () => {
     const t = new ThreadCoreTester("ch_1");
 
     t.dispatchOpenCodeEvent(textPart("First", "m1", "p1"));
-    t.dispatchOpenCodeEvent(textPart("Second", "m1", "p2"));
-
     expect(t.sentMessages).toContainEqual({ content: "⬥ First" });
 
+    t.dispatchOpenCodeEvent(textPart("Second", "m1", "p2"));
+    expect(t.sentMessages).toContainEqual({ content: "⬥ Second" });
+
     t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
-    expect(t.sentMessages).toContainEqual({
-      content: "⬥ Second — *gpt-4*",
-    });
+    expect(t.messageEdits).toContain("⬥ Second — *gpt-4*");
   });
 
   describe("message splitting", () => {
     test("long text part is split into multiple messages", () => {
       const t = new ThreadCoreTester("ch_1");
 
-      // A part longer than 2000 chars
       t.dispatchOpenCodeEvent(textPart("x".repeat(2500), "m1"));
-      t.advanceTime();
 
       expect(t.sentMessages.length).toBeGreaterThan(1);
       const allContent = t.sentMessages.map((m) => m.content).join("");
@@ -159,7 +144,6 @@ describe("ThreadCore", () => {
       const t = new ThreadCoreTester("ch_1");
 
       t.dispatchOpenCodeEvent(textPart("abcde", "m1"));
-      t.advanceTime();
 
       expect(t.sentMessages).toHaveLength(1);
       expect(t.sentMessages[0]?.content).toBe("⬥ abcde");
@@ -171,10 +155,6 @@ describe("ThreadCore", () => {
       const t = new ThreadCoreTester("ch_1");
 
       t.dispatchOpenCodeEvent(textPartWithAttach("Some text", "src/foo.ts", "m1"));
-
-      expect(t.sentMessages).toHaveLength(0);
-
-      t.advanceTime();
 
       expect(t.sentMessages).toContainEqual({
         content: "⬥ Some text 📎 src/foo.ts more text",
@@ -188,9 +168,7 @@ describe("ThreadCore", () => {
       t.dispatchOpenCodeEvent(textPartWithAttach("Some text", "src/foo.ts", "m1"));
       t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
 
-      expect(t.sentMessages).toContainEqual({
-        content: "⬥ Some text 📎 src/foo.ts more text — *gpt-4*",
-      });
+      expect(t.messageEdits).toContain("⬥ Some text 📎 src/foo.ts more text — *gpt-4*");
       expect(t.fileFetches).toContainEqual({ path: "src/foo.ts" });
     });
 
@@ -198,7 +176,6 @@ describe("ThreadCore", () => {
       const t = new ThreadCoreTester("ch_1");
 
       t.dispatchOpenCodeEvent(textPartWithAttach("Some text", "src/foo.ts", "m1"));
-      t.advanceTime();
 
       t.resolveFileFetch("src/foo.ts", {
         ok: true,
@@ -219,7 +196,6 @@ describe("ThreadCore", () => {
       const text =
         "Here are files: <discord-attach>a.ts</discord-attach> and <discord-attach>b.ts</discord-attach>";
       t.dispatchOpenCodeEvent(textPart(text, "m1"));
-      t.advanceTime();
 
       expect(t.fileFetches).toHaveLength(2);
 
@@ -243,7 +219,6 @@ describe("ThreadCore", () => {
       const t = new ThreadCoreTester("ch_1");
 
       t.dispatchOpenCodeEvent(textPartWithAttach("Some text", "missing.ts", "m1"));
-      t.advanceTime();
 
       t.resolveFileFetch("missing.ts", {
         ok: false,
@@ -265,7 +240,6 @@ describe("ThreadCore", () => {
         (_, i) => `<discord-attach>file${i}.ts</discord-attach>`,
       );
       t.dispatchOpenCodeEvent(textPart(tags.join(" "), "m1"));
-      t.advanceTime();
 
       expect(t.fileFetches).toHaveLength(11);
       t.resolveAllFileFetches(true);
@@ -276,85 +250,6 @@ describe("ThreadCore", () => {
       expect(attachMsgs[1]!.attachments).toHaveLength(1);
     });
 
-    describe("tool grouping", () => {
-      test("first tool in a group sends a new message", () => {
-        const t = new ThreadCoreTester("ch_1");
-
-        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
-
-        expect(t.sentMessages).toHaveLength(1);
-        expect(t.sentMessages[0]!.content).toContain("bash");
-      });
-
-      test("second tool in same group edits the first message", () => {
-        const t = new ThreadCoreTester("ch_1");
-
-        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
-        t.dispatchOpenCodeEvent(toolPart("read", "running", "m1", "t2"));
-
-        expect(t.sentMessages).toHaveLength(1);
-        expect(t.messageEdits).toHaveLength(1);
-        expect(t.messageEdits[0]).toBe("┣ bash\n┣ **");
-      });
-
-      test("tool completed updates the line in the composite", () => {
-        const t = new ThreadCoreTester("ch_1");
-
-        t.dispatchOpenCodeEvent(toolPart("read", "running", "m1", "t1"));
-        t.dispatchOpenCodeEvent(toolPart("read", "completed", "m1", "t1"));
-
-        expect(t.sentMessages).toHaveLength(1);
-        expect(t.messageEdits).toHaveLength(1);
-      });
-
-      test("text after tools finalizes the tool group and sends text separately", () => {
-        const t = new ThreadCoreTester("ch_1");
-
-        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
-        t.dispatchOpenCodeEvent(textPart("Response", "m2"));
-        t.advanceTime();
-
-        expect(t.sentMessages).toHaveLength(2);
-        expect(t.sentMessages[0]!.content).toContain("bash");
-        expect(t.sentMessages[1]!.content).toContain("⬥ Response");
-      });
-
-      test("tools after text flush deferred text then start tool group", () => {
-        const t = new ThreadCoreTester("ch_1");
-
-        t.dispatchOpenCodeEvent(textPart("Thinking", "m1"));
-        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
-
-        expect(t.sentMessages).toHaveLength(2);
-        expect(t.sentMessages[0]!.content).toContain("Thinking");
-        expect(t.sentMessages[1]!.content).toContain("bash");
-      });
-
-      test("tool group splits into a new message when composite exceeds length limit", () => {
-        const t = new ThreadCoreTester("ch_1");
-        const longLine = "a".repeat(1990);
-
-        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1", { command: longLine }));
-        t.dispatchOpenCodeEvent(toolPart("read", "running", "m1", "t2"));
-
-        expect(t.sentMessages).toHaveLength(2);
-        expect(t.messageEdits).toHaveLength(0);
-        expect(t.sentMessages[0]!.content).toContain("bash");
-        expect(t.sentMessages[1]!.content).toBe("┣ **");
-      });
-
-      test("message.updated at end with open tool group finalizes it", () => {
-        const t = new ThreadCoreTester("ch_1");
-
-        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
-        t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
-
-        expect(t.messageEdits.length).toBeGreaterThanOrEqual(1);
-        expect(t.sentMessages).toHaveLength(2);
-        expect(t.sentMessages[1]!.content).toBe("— *gpt-4*");
-      });
-    });
-
     test("exactly 10 files sent in single message", () => {
       const t = new ThreadCoreTester("ch_1");
 
@@ -363,7 +258,6 @@ describe("ThreadCore", () => {
         (_, i) => `<discord-attach>file${i}.ts</discord-attach>`,
       );
       t.dispatchOpenCodeEvent(textPart(tags.join(" "), "m1"));
-      t.advanceTime();
       t.resolveAllFileFetches(true);
 
       const attachMsgs = t.sentMessages.filter((m) => m.content.startsWith("📎"));
@@ -380,7 +274,6 @@ describe("ThreadCore", () => {
           "m1",
         ),
       );
-      t.advanceTime();
 
       t.resolveFileFetch("ok.ts", {
         ok: true,
@@ -398,6 +291,84 @@ describe("ThreadCore", () => {
       expect(attachMsg!.attachments![0]!.name).toBe("ok.ts");
       expect(attachMsg!.content).toContain("✅ ok.ts");
       expect(attachMsg!.content).toContain("⚠️ bad.ts: not found");
+    });
+  });
+
+  describe("tool grouping", () => {
+    test("first tool in a group sends a new message", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+
+      expect(t.sentMessages).toHaveLength(1);
+      expect(t.sentMessages[0]!.content).toContain("bash");
+    });
+
+    test("second tool in same group edits the first message", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+      t.dispatchOpenCodeEvent(toolPart("read", "running", "m1", "t2"));
+
+      expect(t.sentMessages).toHaveLength(1);
+      expect(t.messageEdits).toHaveLength(1);
+      expect(t.messageEdits[0]).toBe("┣ bash\n┣ **");
+    });
+
+    test("tool completed updates the line in the composite", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(toolPart("read", "running", "m1", "t1"));
+      t.dispatchOpenCodeEvent(toolPart("read", "completed", "m1", "t1"));
+
+      expect(t.sentMessages).toHaveLength(1);
+      expect(t.messageEdits).toHaveLength(1);
+    });
+
+    test("text after tools finalizes the tool group and sends text separately", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+      t.dispatchOpenCodeEvent(textPart("Response", "m2"));
+
+      expect(t.sentMessages).toHaveLength(2);
+      expect(t.sentMessages[0]!.content).toContain("bash");
+      expect(t.sentMessages[1]!.content).toContain("⬥ Response");
+    });
+
+    test("tools after text flush text ref then start tool group", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(textPart("Thinking", "m1"));
+      t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+
+      expect(t.sentMessages).toHaveLength(2);
+      expect(t.sentMessages[0]!.content).toContain("Thinking");
+      expect(t.sentMessages[1]!.content).toContain("bash");
+    });
+
+    test("tool group splits into a new message when composite exceeds length limit", () => {
+      const t = new ThreadCoreTester("ch_1");
+      const longLine = "a".repeat(1990);
+
+      t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1", { command: longLine }));
+      t.dispatchOpenCodeEvent(toolPart("read", "running", "m1", "t2"));
+
+      expect(t.sentMessages).toHaveLength(2);
+      expect(t.messageEdits).toHaveLength(0);
+      expect(t.sentMessages[0]!.content).toContain("bash");
+      expect(t.sentMessages[1]!.content).toBe("┣ **");
+    });
+
+    test("message.updated at end with open tool group finalizes it", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+      t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
+
+      expect(t.messageEdits.length).toBeGreaterThanOrEqual(1);
+      expect(t.sentMessages).toHaveLength(2);
+      expect(t.sentMessages[1]!.content).toBe("— *gpt-4*");
     });
   });
 });

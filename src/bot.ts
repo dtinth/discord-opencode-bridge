@@ -47,22 +47,57 @@ function startEventListener(
   run();
 }
 
+const BUFFER_MS = 200;
+
 class DiscordMessageRef implements MessageRef {
   private pendingContent: string | null = null;
+  private resolved = false;
+  private bufferTimer: ReturnType<typeof setTimeout> | null = null;
+  private sentMessage: Promise<{ edit: (c: string) => Promise<unknown> } | null> | null = null;
 
-  constructor(private sendPromise: Promise<{ edit: (c: string) => Promise<unknown> }>) {
-    this.sendPromise.then((msg) => {
-      if (this.pendingContent !== null) {
-        const content = this.pendingContent;
-        this.pendingContent = null;
-        msg.edit(content).catch(() => {});
-      }
-    });
+  constructor(
+    private doSend: () => Promise<{ edit: (c: string) => Promise<unknown> }>,
+    private onSent?: () => void,
+    content?: string,
+  ) {
+    if (content) this.pendingContent = content;
+    this.scheduleSend();
+  }
+
+  private scheduleSend(): void {
+    if (this.bufferTimer) clearTimeout(this.bufferTimer);
+    this.bufferTimer = setTimeout(() => this.flush(), BUFFER_MS);
+  }
+
+  flush(): void {
+    if (this.bufferTimer) {
+      clearTimeout(this.bufferTimer);
+      this.bufferTimer = null;
+    }
+    if (this.resolved) return;
+    this.resolved = true;
+    const content = this.pendingContent ?? "";
+    this.pendingContent = null;
+    this.sentMessage = this.doSend()
+      .then((msg) => {
+        this.onSent?.();
+        return msg;
+      })
+      .catch((err) => {
+        log.error("discord send failed", err);
+        return null;
+      });
   }
 
   edit(content: string): void {
-    this.pendingContent = content;
-    this.sendPromise = this.sendPromise.then((msg) => msg.edit(content).then(() => msg));
+    if (this.resolved) {
+      this.pendingContent = content;
+      (this.sentMessage ?? Promise.resolve(null)).then((msg) => {
+        if (msg) msg.edit(content).catch(() => {});
+      });
+    } else {
+      this.pendingContent = content;
+    }
   }
 }
 
@@ -78,9 +113,7 @@ function coreForSession(
 ): ThreadCore {
   let core = sessionCores.get(sessionId);
   if (core) return core;
-  const timers = new Map<string, ReturnType<typeof setTimeout>>();
   let lastTypingTime = 0;
-  const coreRef = { current: null as ThreadCore | null };
   const delegate: ThreadCoreDelegate = {
     sendMessage: (opts: SendMessageOptions) => {
       const fileInfo =
@@ -88,31 +121,30 @@ function coreForSession(
           ? ` (${opts.attachments.length} file(s))`
           : "";
       log.info(`sending to discord:${fileInfo} ${opts.content.slice(0, 120)}`);
-      const channelPromise = client.channels.fetch(threadId);
-      const sendPromise = channelPromise.then((ch) => {
-        if (ch?.isTextBased() && ch.isSendable()) {
-          const sendOpts: Record<string, unknown> = { content: opts.content };
-          if (opts.attachments && opts.attachments.length > 0) {
-            sendOpts.files = opts.attachments.map((a) => ({
-              attachment: a.content,
-              name: a.name,
-            }));
-          }
-          if (opts.flags) sendOpts.flags = opts.flags;
-          return (
-            ch as {
-              send: (
-                opts: Record<string, unknown>,
-              ) => Promise<{ id: string; edit: (c: string) => Promise<unknown> }>;
+      const doSend = () =>
+        client.channels.fetch(threadId).then((ch) => {
+          if (ch?.isTextBased() && ch.isSendable()) {
+            const sendOpts: Record<string, unknown> = { content: opts.content };
+            if (opts.attachments && opts.attachments.length > 0) {
+              sendOpts.files = opts.attachments.map((a) => ({
+                attachment: a.content,
+                name: a.name,
+              }));
             }
-          ).send(sendOpts);
-        } else {
-          log.warn("channel not sendable", threadId);
-          throw new Error("channel not sendable");
-        }
-      });
-      sendPromise.then(() => opts.onSent?.()).catch((err) => log.error("discord send failed", err));
-      return new DiscordMessageRef(sendPromise);
+            if (opts.flags) sendOpts.flags = opts.flags;
+            return (
+              ch as {
+                send: (
+                  opts: Record<string, unknown>,
+                ) => Promise<{ id: string; edit: (c: string) => Promise<unknown> }>;
+              }
+            ).send(sendOpts);
+          } else {
+            log.warn("channel not sendable", threadId);
+            throw new Error("channel not sendable");
+          }
+        });
+      return new DiscordMessageRef(doSend, opts.onSent, opts.content);
     },
     fetchFile: (path, onResult) => {
       log.info(`fetching file: ${path}`);
@@ -125,20 +157,6 @@ function coreForSession(
           log.warn(`file fetch failed: ${path}`, err.message ?? String(err));
           onResult({ ok: false, path, error: err.message ?? String(err) });
         });
-    },
-    setTimer: (timerId, ms) => {
-      const timer = setTimeout(() => {
-        timers.delete(timerId);
-        coreRef.current?.handleTimerExpired(timerId);
-      }, ms);
-      timers.set(timerId, timer);
-    },
-    clearTimer: (timerId) => {
-      const timer = timers.get(timerId);
-      if (timer) {
-        clearTimeout(timer);
-        timers.delete(timerId);
-      }
     },
     showTyping: () => {
       const now = Date.now();
@@ -155,7 +173,6 @@ function coreForSession(
     },
   };
   core = new ThreadCore(channelId, delegate);
-  coreRef.current = core;
   sessionCores.set(sessionId, core);
   return core;
 }

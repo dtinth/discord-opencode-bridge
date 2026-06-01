@@ -12,6 +12,7 @@ export type FileFetchResult =
 
 export interface MessageRef {
   edit(content: string): void;
+  flush(): void;
 }
 
 export interface SendMessageOptions {
@@ -24,8 +25,6 @@ export interface SendMessageOptions {
 
 export interface ThreadCoreDelegate {
   sendMessage(options: SendMessageOptions): MessageRef;
-  setTimer(timerId: string, ms: number): void;
-  clearTimer(timerId: string): void;
   showTyping(): void;
   fetchFile(path: string, onResult: (result: FileFetchResult) => void): void;
 }
@@ -110,17 +109,14 @@ const DISCORD_MAX_MESSAGE_LENGTH = 2000;
 export class ThreadCore {
   private channelId: string;
   private delegate: ThreadCoreDelegate;
-  private deferredTexts = new Map<string, { text: string }>();
+  private lastTextRef: MessageRef | null = null;
+  private lastTextCleanText: string | null = null;
   private toolRef: MessageRef | null = null;
   private toolParts = new Map<string, Part>();
 
   constructor(channelId: string, delegate: ThreadCoreDelegate) {
     this.channelId = channelId;
     this.delegate = delegate;
-  }
-
-  private flushDeferredText(messageID: string): void {
-    this.sendDeferredWithAttachments(messageID);
   }
 
   private buildToolComposite(): string {
@@ -138,18 +134,31 @@ export class ThreadCore {
     this.toolParts.clear();
   }
 
+  private flushTextRef(): void {
+    if (!this.lastTextRef) return;
+    this.lastTextRef.flush();
+    this.lastTextRef = null;
+    this.lastTextCleanText = null;
+  }
+
   handleOpenCodeEvent(event: OpenCodeEvent): void {
     const part = getPart(event);
     if (event.type === "message.part.updated" && part) {
       const messageID = part.messageID;
       if (part.type === "text" && part.time?.end && part.text?.trim() && messageID) {
         this.finalizeToolGroup();
-        this.flushDeferredText(messageID);
-        this.delegate.setTimer(messageID, 200);
-        this.deferredTexts.set(messageID, { text: part.text.trim() });
+        this.flushTextRef();
+        const { cleanText, paths } = this.parseAttachmentTags(part.text.trim());
+        const content = `⬥ ${cleanText}`;
+        this.lastTextCleanText = cleanText;
+        this.lastTextRef = this.sendContent(content, undefined, () => {
+          if (paths.length > 0) {
+            this.startAttachmentBatch(this.channelId, paths);
+          }
+        });
       } else if (part.type === "tool" && messageID) {
         if (part.state?.status === "pending") return;
-        this.flushDeferredText(messageID);
+        this.flushTextRef();
         if (part.id) {
           this.toolParts.set(part.id, part);
         }
@@ -184,18 +193,17 @@ export class ThreadCore {
       const infoId = info.id as string | undefined;
       if (!infoId) return;
 
-      const deferred = this.deferredTexts.get(infoId);
       const footer = formatFooter(info);
 
-      if (deferred) {
-        if (footer) {
-          this.sendDeferredWithAttachments(infoId, footer);
-          return;
-        }
-        if (info.finish === "tool-calls") {
-          this.sendDeferredWithAttachments(infoId);
-          return;
-        }
+      if (this.lastTextRef && footer) {
+        this.lastTextRef.edit(`⬥ ${this.lastTextCleanText} — ${footer}`);
+        this.lastTextRef = null;
+        this.lastTextCleanText = null;
+        return;
+      }
+      if (this.lastTextRef && info.finish === "tool-calls") {
+        this.lastTextRef = null;
+        this.lastTextCleanText = null;
         return;
       }
 
@@ -203,10 +211,6 @@ export class ThreadCore {
         this.sendContent(`— ${footer}`);
       }
     }
-  }
-
-  handleTimerExpired(timerId: string): void {
-    this.sendDeferredWithAttachments(timerId);
   }
 
   private parseAttachmentTags(text: string): { cleanText: string; paths: string[] } {
@@ -221,29 +225,14 @@ export class ThreadCore {
     return { cleanText, paths };
   }
 
-  private sendDeferredWithAttachments(messageID: string, footer?: string): void {
-    const deferred = this.deferredTexts.get(messageID);
-    if (!deferred) return;
-    this.deferredTexts.delete(messageID);
-    this.delegate.clearTimer(messageID);
-
-    const { cleanText, paths } = this.parseAttachmentTags(deferred.text);
-    const fullContent = footer ? `⬥ ${cleanText} — ${footer}` : `⬥ ${cleanText}`;
-    this.sendContent(fullContent, undefined, () => {
-      if (paths.length > 0) {
-        this.startAttachmentBatch(this.channelId, paths);
-      }
-    });
-  }
-
   private sendContent(
     content: string,
     attachments?: FileAttachment[],
     onAllSent?: () => void,
     flags?: number,
-  ): void {
+  ): MessageRef {
     const chunks = splitContent(content);
-    this.sendChunks(chunks, 0, attachments, onAllSent, flags);
+    return this.sendChunks(chunks, 0, attachments, onAllSent, flags);
   }
 
   private sendChunks(
@@ -252,10 +241,10 @@ export class ThreadCore {
     attachments?: FileAttachment[],
     onAllSent?: () => void,
     flags?: number,
-  ): void {
+  ): MessageRef {
     if (index >= chunks.length) {
       onAllSent?.();
-      return;
+      return null!;
     }
     const chunk = chunks[index]!;
     const isLast = index === chunks.length - 1;
@@ -268,7 +257,7 @@ export class ThreadCore {
       opts.attachments = attachments;
     }
     opts.onSent = () => this.sendChunks(chunks, index + 1, attachments, onAllSent, flags);
-    this.delegate.sendMessage(opts);
+    return this.delegate.sendMessage(opts);
   }
 
   private startAttachmentBatch(channelId: string, paths: string[]): void {
