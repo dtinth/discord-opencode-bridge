@@ -120,11 +120,11 @@ function coreForSession(
         opts.attachments && opts.attachments.length > 0
           ? ` (${opts.attachments.length} file(s))`
           : "";
-      log.info(`sending to discord:${fileInfo} ${opts.content.slice(0, 120)}`);
+      log.info(`sending to discord:${fileInfo} ${(opts.content ?? "").slice(0, 120)}`);
       const doSend = () =>
         client.channels.fetch(threadId).then((ch) => {
           if (ch?.isTextBased() && ch.isSendable()) {
-            const sendOpts: Record<string, unknown> = { content: opts.content };
+            const sendOpts: Record<string, unknown> = { content: opts.content ?? "" };
             if (opts.attachments && opts.attachments.length > 0) {
               sendOpts.files = opts.attachments.map((a) => ({
                 attachment: a.content,
