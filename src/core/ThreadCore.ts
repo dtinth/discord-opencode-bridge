@@ -128,8 +128,6 @@ export class ThreadCore {
 
   private finalizeToolGroup(): void {
     if (!this.toolRef) return;
-    const composite = this.buildToolComposite();
-    this.toolRef.edit(composite);
     this.toolRef = null;
     this.toolParts.clear();
   }
@@ -208,7 +206,8 @@ export class ThreadCore {
       }
 
       if (footer) {
-        this.sendContent(`— ${footer}`);
+        const ref = this.sendContent(`— ${footer}`);
+        ref.flush();
       }
     }
   }

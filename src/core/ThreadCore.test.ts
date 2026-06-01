@@ -360,13 +360,12 @@ describe("ThreadCore", () => {
       expect(t.sentMessages[1]!.content).toBe("┣ **");
     });
 
-    test("message.updated at end with open tool group finalizes it", () => {
+    test("message.updated at end finalizes tool group and sends footer", () => {
       const t = new ThreadCoreTester("ch_1");
 
       t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
       t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
 
-      expect(t.messageEdits.length).toBeGreaterThanOrEqual(1);
       expect(t.sentMessages).toHaveLength(2);
       expect(t.sentMessages[1]!.content).toBe("— *gpt-4*");
     });
