@@ -437,14 +437,18 @@ describe("ThreadCore", () => {
       expect(t.messageEdits).toContain("⬥ Done — *gpt-4*");
     });
 
-    test("user message finalizes tool group", () => {
+    test("tool group finalized on message.updated with finish=stop", () => {
       const t = new ThreadCoreTester("ch_1");
 
       t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
-      t.dispatchOpenCodeEvent(userMessageUpdated("m2"));
+      t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
 
-      expect(t.sentMessages).toHaveLength(1);
-      expect(t.messageEdits.length).toBe(0);
+      expect(t.sentMessages).toHaveLength(2);
+      expect(t.sentMessages[1]!.content).toBe("— *gpt-4*");
+
+      t.dispatchOpenCodeEvent(toolPart("read", "running", "m2", "t2"));
+      expect(t.sentMessages).toHaveLength(3);
+      expect(t.sentMessages[2]!.content).toBe("┣ **");
     });
   });
 });

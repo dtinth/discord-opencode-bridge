@@ -186,12 +186,6 @@ export class ThreadCore {
       const infoId = info.id as string | undefined;
       if (!infoId) return;
 
-      if (info.role === "user") {
-        this.finalizeToolGroup();
-        this.flushTextRef();
-        return;
-      }
-
       const footer = formatFooter(info);
 
       if (this.lastTextRef && footer) {
@@ -206,6 +200,10 @@ export class ThreadCore {
 
       if (footer) {
         this.sendContent(`— ${footer}`);
+      }
+
+      if (info.finish === "stop") {
+        this.finalizeToolGroup();
       }
     }
   }
