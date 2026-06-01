@@ -10,9 +10,8 @@ export type FileFetchResult =
   | { ok: true; file: FileAttachment }
   | { ok: false; path: string; error: string };
 
-export interface MessageRef {
-  edit(content: string): void;
-}
+export type DiscordMessage = { edit: (c: string) => Promise<unknown> };
+export type DiscordMessagePromise = Promise<DiscordMessage>;
 
 export interface SendMessageOptions {
   channelId: string;
@@ -23,7 +22,7 @@ export interface SendMessageOptions {
 }
 
 export interface ThreadCoreDelegate {
-  sendMessage(options: SendMessageOptions): MessageRef;
+  sendMessage(options: SendMessageOptions): Promise<DiscordMessage>;
   showTyping(): void;
   fetchFile(path: string, onResult: (result: FileFetchResult) => void): void;
 }
@@ -108,9 +107,9 @@ const DISCORD_MAX_MESSAGE_LENGTH = 2000;
 export class ThreadCore {
   private channelId: string;
   private delegate: ThreadCoreDelegate;
-  private lastTextRef: MessageRef | null = null;
+  private lastTextPromise: DiscordMessagePromise | null = null;
   private lastTextCleanText: string | null = null;
-  private toolRef: MessageRef | null = null;
+  private toolMsg: DiscordMessagePromise | null = null;
   private toolParts = new Map<string, Part>();
 
   constructor(channelId: string, delegate: ThreadCoreDelegate) {
@@ -125,28 +124,15 @@ export class ThreadCore {
       .join("\n");
   }
 
-  private finalizeToolGroup(): void {
-    if (!this.toolRef) return;
-    this.toolRef = null;
-    this.toolParts.clear();
-  }
-
-  private flushTextRef(): void {
-    if (!this.lastTextRef) return;
-    this.lastTextRef = null;
-    this.lastTextCleanText = null;
-  }
-
   handleOpenCodeEvent(event: OpenCodeEvent): void {
     const part = getPart(event);
     if (event.type === "message.part.updated" && part) {
       const messageID = part.messageID;
       if (part.type === "text" && part.time?.end && part.text?.trim() && messageID) {
-        this.flushTextRef();
         const { cleanText, paths } = this.parseAttachmentTags(part.text.trim());
         const content = `⬥ ${cleanText}`;
         this.lastTextCleanText = cleanText;
-        this.lastTextRef = this.sendContent(content, undefined, () => {
+        this.lastTextPromise = this.sendContent(content, undefined, () => {
           if (paths.length > 0) {
             this.startAttachmentBatch(this.channelId, paths);
           }
@@ -157,24 +143,17 @@ export class ThreadCore {
           this.toolParts.set(part.id, part);
         }
         const composite = this.buildToolComposite();
-        if (!this.toolRef) {
-          this.toolRef = this.delegate.sendMessage({
-            channelId: this.channelId,
-            content: composite,
-            flags: 1 << 12,
-          });
-        } else if (composite.length > DISCORD_MAX_MESSAGE_LENGTH) {
-          this.toolRef = null;
+        if (this.toolMsg && composite.length <= DISCORD_MAX_MESSAGE_LENGTH) {
+          this.toolMsg = this.toolMsg.then((msg) => msg.edit(composite).then(() => msg));
+        } else {
+          this.toolMsg = null;
           this.toolParts.clear();
           if (part.id) this.toolParts.set(part.id, part);
-          const fresh = this.buildToolComposite();
-          this.toolRef = this.delegate.sendMessage({
+          this.toolMsg = this.delegate.sendMessage({
             channelId: this.channelId,
-            content: fresh,
+            content: this.buildToolComposite(),
             flags: 1 << 12,
           });
-        } else {
-          this.toolRef.edit(composite);
         }
       } else {
         this.delegate.showTyping();
@@ -188,11 +167,11 @@ export class ThreadCore {
 
       const footer = formatFooter(info);
 
-      if (this.lastTextRef && footer) {
+      if (this.lastTextPromise && footer) {
         const fullContent = `⬥ ${this.lastTextCleanText} — ${footer}`;
         if (fullContent.length <= DISCORD_MAX_MESSAGE_LENGTH) {
-          this.lastTextRef.edit(fullContent);
-          this.lastTextRef = null;
+          this.lastTextPromise.then((msg) => msg.edit(fullContent).catch(() => {}));
+          this.lastTextPromise = null;
           this.lastTextCleanText = null;
           return;
         }
@@ -203,9 +182,50 @@ export class ThreadCore {
       }
 
       if (info.finish === "stop") {
-        this.finalizeToolGroup();
+        this.toolMsg = null;
+        this.toolParts.clear();
       }
     }
+  }
+
+  private sendContent(
+    content: string,
+    attachments?: FileAttachment[],
+    onAllSent?: () => void,
+    flags?: number,
+  ): DiscordMessagePromise {
+    const chunks = splitContent(content);
+    let resolvePromise: (msg: DiscordMessage) => void;
+    const promise = new Promise<DiscordMessage>((r) => {
+      resolvePromise = r;
+    });
+    let index = 0;
+    const sendNext = () => {
+      if (index >= chunks.length) {
+        onAllSent?.();
+        return;
+      }
+      const isLast = index === chunks.length - 1;
+      const opts: SendMessageOptions = {
+        channelId: this.channelId,
+        content: chunks[index]!,
+        flags,
+      };
+      if (isLast && attachments) {
+        opts.attachments = attachments;
+      }
+      this.delegate.sendMessage(opts).then((msg) => {
+        index++;
+        if (isLast) {
+          onAllSent?.();
+          resolvePromise(msg);
+        } else {
+          sendNext();
+        }
+      });
+    };
+    sendNext();
+    return promise;
   }
 
   private parseAttachmentTags(text: string): { cleanText: string; paths: string[] } {
@@ -218,41 +238,6 @@ export class ThreadCore {
       },
     );
     return { cleanText, paths };
-  }
-
-  private sendContent(
-    content: string,
-    attachments?: FileAttachment[],
-    onAllSent?: () => void,
-    flags?: number,
-  ): MessageRef {
-    const chunks = splitContent(content);
-    return this.sendChunks(chunks, 0, attachments, onAllSent, flags);
-  }
-
-  private sendChunks(
-    chunks: string[],
-    index: number,
-    attachments?: FileAttachment[],
-    onAllSent?: () => void,
-    flags?: number,
-  ): MessageRef {
-    if (index >= chunks.length) {
-      onAllSent?.();
-      return null!;
-    }
-    const chunk = chunks[index]!;
-    const isLast = index === chunks.length - 1;
-    const opts: SendMessageOptions = {
-      channelId: this.channelId,
-      content: chunk,
-      flags,
-    };
-    if (isLast && attachments) {
-      opts.attachments = attachments;
-    }
-    opts.onSent = () => this.sendChunks(chunks, index + 1, attachments, onAllSent, flags);
-    return this.delegate.sendMessage(opts);
   }
 
   private startAttachmentBatch(channelId: string, paths: string[]): void {

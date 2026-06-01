@@ -3,20 +3,8 @@ import {
   type FileFetchResult,
   type ThreadCoreDelegate,
   type OpenCodeEvent,
-  type MessageRef,
+  type DiscordMessage,
 } from "./ThreadCore";
-
-export class FakeMessageRef implements MessageRef {
-  edits: string[] = [];
-  constructor(
-    public content: string,
-    private onEdit?: (content: string) => void,
-  ) {}
-  edit(content: string): void {
-    this.edits.push(content);
-    this.onEdit?.(content);
-  }
-}
 
 export class ThreadCoreTester {
   sentMessages: Array<{
@@ -32,10 +20,14 @@ export class ThreadCoreTester {
   constructor(channelId: string) {
     const delegate: ThreadCoreDelegate = {
       sendMessage: (opts) => {
-        const ref = new FakeMessageRef(opts.content, (c) => this.messageEdits.push(c));
         this.sentMessages.push({ content: opts.content, attachments: opts.attachments });
         if (opts.onSent) this.pendingOnSent.push(opts.onSent);
-        return ref;
+        return Promise.resolve({
+          edit: (c: string) => {
+            this.messageEdits.push(c);
+            return Promise.resolve();
+          },
+        });
       },
       showTyping: () => {},
       fetchFile: (path, onResult) => {
@@ -46,9 +38,10 @@ export class ThreadCoreTester {
     this.core = new ThreadCore(channelId, delegate);
   }
 
-  dispatchOpenCodeEvent(event: OpenCodeEvent): void {
+  async dispatchOpenCodeEvent(event: OpenCodeEvent): Promise<void> {
     this.core.handleOpenCodeEvent(event);
     this.flushOnSent();
+    await new Promise((r) => setTimeout(r, 0));
   }
 
   private flushOnSent(): void {

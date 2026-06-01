@@ -19,12 +19,7 @@ import {
   type OpenCodeEvent,
   type Part,
 } from "./opencode";
-import {
-  ThreadCore,
-  type ThreadCoreDelegate,
-  type SendMessageOptions,
-  type MessageRef,
-} from "./core/ThreadCore";
+import { ThreadCore, type ThreadCoreDelegate, type SendMessageOptions } from "./core/ThreadCore";
 
 function startEventListener(
   cfg: ChannelConfig,
@@ -47,65 +42,6 @@ function startEventListener(
   run();
 }
 
-const BUFFER_MS = 200;
-
-class DiscordMessageRef implements MessageRef {
-  private pendingContent: string | null = null;
-  private resolved = false;
-  private bufferTimer: ReturnType<typeof setTimeout> | null = null;
-  private sentMessage: Promise<{ edit: (c: string) => Promise<unknown> } | null> | null = null;
-  private lastContent = "";
-
-  constructor(
-    private doSend: (content: string) => Promise<{ edit: (c: string) => Promise<unknown> }>,
-    private onSent?: () => void,
-    content?: string,
-  ) {
-    if (content) {
-      this.pendingContent = content;
-      this.lastContent = content;
-    }
-    this.scheduleSend();
-  }
-
-  private scheduleSend(): void {
-    if (this.bufferTimer) clearTimeout(this.bufferTimer);
-    this.bufferTimer = setTimeout(() => {
-      if (this.resolved) return;
-      this.resolved = true;
-      const content = this.pendingContent ?? "";
-      this.pendingContent = null;
-      this.sentMessage = this.doSend(content)
-        .then((msg) => {
-          this.onSent?.();
-          return msg;
-        })
-        .catch((err) => {
-          log.error("discord send failed", err);
-          return null;
-        });
-    }, BUFFER_MS);
-  }
-
-  edit(content: string): void {
-    if (content === this.lastContent) return;
-    this.lastContent = content;
-    if (this.resolved) {
-      this.sentMessage = (this.sentMessage ?? Promise.resolve(null))
-        .then((msg) => {
-          if (msg) return msg.edit(content).then(() => msg);
-          return null as never;
-        })
-        .catch((err) => {
-          log.error("discord edit failed", err);
-          return null;
-        });
-    } else {
-      this.pendingContent = content;
-    }
-  }
-}
-
 const threadUsers = new Map<string, string>();
 const sessionCores = new Map<string, ThreadCore>();
 
@@ -126,10 +62,11 @@ function coreForSession(
           ? ` (${opts.attachments.length} file(s))`
           : "";
       log.info(`sending to discord:${fileInfo} ${(opts.content ?? "").slice(0, 120)}`);
-      const doSend = (sendContent: string) =>
-        client.channels.fetch(threadId).then((ch) => {
+      return client.channels
+        .fetch(threadId)
+        .then((ch) => {
           if (ch?.isTextBased() && ch.isSendable()) {
-            const sendOpts: Record<string, unknown> = { content: sendContent };
+            const sendOpts: Record<string, unknown> = { content: opts.content ?? "" };
             if (opts.attachments && opts.attachments.length > 0) {
               sendOpts.files = opts.attachments.map((a) => ({
                 attachment: a.content,
@@ -148,8 +85,15 @@ function coreForSession(
             log.warn("channel not sendable", threadId);
             throw new Error("channel not sendable");
           }
+        })
+        .then((msg) => {
+          opts.onSent?.();
+          return msg;
+        })
+        .catch((err) => {
+          log.error("discord send failed", err);
+          throw err;
         });
-      return new DiscordMessageRef(doSend, opts.onSent, opts.content);
     },
     fetchFile: (path, onResult) => {
       log.info(`fetching file: ${path}`);
