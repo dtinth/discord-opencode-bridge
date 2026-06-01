@@ -48,6 +48,15 @@ function messageUpdated(messageID: string, modelID: string, finish?: string, com
   };
 }
 
+function userMessageUpdated(messageID: string) {
+  return {
+    type: "message.updated" as const,
+    properties: {
+      info: { id: messageID, role: "user", time: { created: 100 } },
+    },
+  } as const;
+}
+
 describe("ThreadCore", () => {
   test("text sent immediately, message.updated edits to add footer", () => {
     const t = new ThreadCoreTester("ch_1");
@@ -380,6 +389,52 @@ describe("ThreadCore", () => {
 
       expect(t.sentMessages).toHaveLength(2);
       expect(t.sentMessages[1]!.content).toBe("— *gpt-4*");
+    });
+
+    test("tools from multiple rounds accumulate in one group", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+      t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "tool-calls", 200));
+      t.dispatchOpenCodeEvent(toolPart("read", "running", "m2", "t2"));
+
+      expect(t.sentMessages).toHaveLength(1);
+      expect(t.messageEdits).toHaveLength(1);
+      expect(t.messageEdits[0]!.split("\n")).toHaveLength(2);
+    });
+
+    test("text does not finalize tool group", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+      t.dispatchOpenCodeEvent(textPart("response", "m2"));
+      t.dispatchOpenCodeEvent(toolPart("read", "running", "m3", "t2"));
+
+      expect(t.sentMessages).toHaveLength(2);
+      expect(t.sentMessages[0]!.content).toContain("bash");
+      expect(t.sentMessages[1]!.content).toContain("response");
+      expect(t.messageEdits).toHaveLength(1);
+      expect(t.messageEdits[0]!.split("\n")).toHaveLength(2);
+    });
+
+    test("message.updated(tool-calls) does not drop lastTextRef", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(textPart("Hello", "m1"));
+      t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "tool-calls", 200));
+      t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 300));
+
+      expect(t.messageEdits).toContain("⬥ Hello — *gpt-4*");
+    });
+
+    test("user message finalizes tool group", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+      t.dispatchOpenCodeEvent(userMessageUpdated("m2"));
+
+      expect(t.sentMessages).toHaveLength(1);
+      expect(t.messageEdits.length).toBe(0);
     });
   });
 });

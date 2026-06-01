@@ -142,7 +142,6 @@ export class ThreadCore {
     if (event.type === "message.part.updated" && part) {
       const messageID = part.messageID;
       if (part.type === "text" && part.time?.end && part.text?.trim() && messageID) {
-        this.finalizeToolGroup();
         this.flushTextRef();
         const { cleanText, paths } = this.parseAttachmentTags(part.text.trim());
         const content = `⬥ ${cleanText}`;
@@ -188,6 +187,12 @@ export class ThreadCore {
       const infoId = info.id as string | undefined;
       if (!infoId) return;
 
+      if (info.role === "user") {
+        this.finalizeToolGroup();
+        this.flushTextRef();
+        return;
+      }
+
       const footer = formatFooter(info);
 
       if (this.lastTextRef && footer) {
@@ -198,11 +203,6 @@ export class ThreadCore {
           this.lastTextCleanText = null;
           return;
         }
-      }
-
-      if (this.lastTextRef && info.finish === "tool-calls") {
-        this.lastTextRef = null;
-        this.lastTextCleanText = null;
       }
 
       if (footer) {
