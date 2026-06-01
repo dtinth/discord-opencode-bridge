@@ -182,7 +182,6 @@ export class ThreadCore {
         this.delegate.showTyping();
       }
     } else if (event.type === "message.updated") {
-      this.finalizeToolGroup();
       const props = event.properties as Record<string, unknown> | undefined;
       const info = props?.info as Record<string, unknown> | undefined;
       if (!info) return;
