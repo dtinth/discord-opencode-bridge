@@ -8,7 +8,6 @@ import {
 
 export class FakeMessageRef implements MessageRef {
   edits: string[] = [];
-  flushed = false;
   constructor(
     public content: string,
     private onEdit?: (content: string) => void,
@@ -16,9 +15,6 @@ export class FakeMessageRef implements MessageRef {
   edit(content: string): void {
     this.edits.push(content);
     this.onEdit?.(content);
-  }
-  flush(): void {
-    this.flushed = true;
   }
 }
 

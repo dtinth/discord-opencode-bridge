@@ -12,7 +12,6 @@ export type FileFetchResult =
 
 export interface MessageRef {
   edit(content: string): void;
-  flush(): void;
 }
 
 export interface SendMessageOptions {
@@ -134,7 +133,6 @@ export class ThreadCore {
 
   private flushTextRef(): void {
     if (!this.lastTextRef) return;
-    this.lastTextRef.flush();
     this.lastTextRef = null;
     this.lastTextCleanText = null;
   }
@@ -206,8 +204,7 @@ export class ThreadCore {
       }
 
       if (footer) {
-        const ref = this.sendContent(`— ${footer}`);
-        ref.flush();
+        this.sendContent(`— ${footer}`);
       }
     }
   }

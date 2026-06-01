@@ -70,28 +70,21 @@ class DiscordMessageRef implements MessageRef {
 
   private scheduleSend(): void {
     if (this.bufferTimer) clearTimeout(this.bufferTimer);
-    this.bufferTimer = setTimeout(() => this.flush(), BUFFER_MS);
-  }
-
-  flush(): void {
-    if (this.bufferTimer) {
-      clearTimeout(this.bufferTimer);
-      this.bufferTimer = null;
-    }
-    if (this.resolved) return;
-    this.resolved = true;
-    const content = this.pendingContent ?? "";
-    this.lastContent = content;
-    this.pendingContent = null;
-    this.sentMessage = this.doSend()
-      .then((msg) => {
-        this.onSent?.();
-        return msg;
-      })
-      .catch((err) => {
-        log.error("discord send failed", err);
-        return null;
-      });
+    this.bufferTimer = setTimeout(() => {
+      if (this.resolved) return;
+      this.resolved = true;
+      const content = this.pendingContent ?? "";
+      this.pendingContent = null;
+      this.sentMessage = this.doSend()
+        .then((msg) => {
+          this.onSent?.();
+          return msg;
+        })
+        .catch((err) => {
+          log.error("discord send failed", err);
+          return null;
+        });
+    }, BUFFER_MS);
   }
 
   edit(content: string): void {
