@@ -10,8 +10,9 @@ export type FileFetchResult =
   | { ok: true; file: FileAttachment }
   | { ok: false; path: string; error: string };
 
-export type DiscordMessage = { edit: (c: string) => Promise<unknown> };
-export type DiscordMessagePromise = Promise<DiscordMessage>;
+export interface MessageRef {
+  edit(content: string): void;
+}
 
 export interface SendMessageOptions {
   channelId: string;
@@ -22,7 +23,7 @@ export interface SendMessageOptions {
 }
 
 export interface ThreadCoreDelegate {
-  sendMessage(options: SendMessageOptions): Promise<DiscordMessage>;
+  sendMessage(options: SendMessageOptions): MessageRef;
   showTyping(): void;
   fetchFile(path: string, onResult: (result: FileFetchResult) => void): void;
 }
@@ -107,9 +108,9 @@ const DISCORD_MAX_MESSAGE_LENGTH = 2000;
 export class ThreadCore {
   private channelId: string;
   private delegate: ThreadCoreDelegate;
-  private lastTextPromise: DiscordMessagePromise | null = null;
+  private lastTextRef: MessageRef | null = null;
   private lastTextCleanText: string | null = null;
-  private toolMsg: DiscordMessagePromise | null = null;
+  private toolRef: MessageRef | null = null;
   private toolParts = new Map<string, Part>();
 
   constructor(channelId: string, delegate: ThreadCoreDelegate) {
@@ -132,7 +133,7 @@ export class ThreadCore {
         const { cleanText, paths } = this.parseAttachmentTags(part.text.trim());
         const content = `⬥ ${cleanText}`;
         this.lastTextCleanText = cleanText;
-        this.lastTextPromise = this.sendContent(content, undefined, () => {
+        this.lastTextRef = this.sendContent(content, undefined, () => {
           if (paths.length > 0) {
             this.startAttachmentBatch(this.channelId, paths);
           }
@@ -143,13 +144,13 @@ export class ThreadCore {
           this.toolParts.set(part.id, part);
         }
         const composite = this.buildToolComposite();
-        if (this.toolMsg && composite.length <= DISCORD_MAX_MESSAGE_LENGTH) {
-          this.toolMsg = this.toolMsg.then((msg) => msg.edit(composite).then(() => msg));
+        if (this.toolRef && composite.length <= DISCORD_MAX_MESSAGE_LENGTH) {
+          this.toolRef.edit(composite);
         } else {
-          this.toolMsg = null;
+          this.toolRef = null;
           this.toolParts.clear();
           if (part.id) this.toolParts.set(part.id, part);
-          this.toolMsg = this.delegate.sendMessage({
+          this.toolRef = this.delegate.sendMessage({
             channelId: this.channelId,
             content: this.buildToolComposite(),
             flags: 1 << 12,
@@ -167,11 +168,11 @@ export class ThreadCore {
 
       const footer = formatFooter(info);
 
-      if (this.lastTextPromise && footer) {
+      if (this.lastTextRef && footer) {
         const fullContent = `⬥ ${this.lastTextCleanText} — ${footer}`;
         if (fullContent.length <= DISCORD_MAX_MESSAGE_LENGTH) {
-          this.lastTextPromise.then((msg) => msg.edit(fullContent).catch(() => {}));
-          this.lastTextPromise = null;
+          this.lastTextRef.edit(fullContent);
+          this.lastTextRef = null;
           this.lastTextCleanText = null;
           return;
         }
@@ -182,7 +183,7 @@ export class ThreadCore {
       }
 
       if (info.finish === "stop") {
-        this.toolMsg = null;
+        this.toolRef = null;
         this.toolParts.clear();
       }
     }
@@ -193,39 +194,26 @@ export class ThreadCore {
     attachments?: FileAttachment[],
     onAllSent?: () => void,
     flags?: number,
-  ): DiscordMessagePromise {
+  ): MessageRef {
     const chunks = splitContent(content);
-    let resolvePromise: (msg: DiscordMessage) => void;
-    const promise = new Promise<DiscordMessage>((r) => {
-      resolvePromise = r;
-    });
-    let index = 0;
-    const sendNext = () => {
-      if (index >= chunks.length) {
-        onAllSent?.();
-        return;
-      }
-      const isLast = index === chunks.length - 1;
+    let firstRef: MessageRef | undefined;
+    for (let i = 0; i < chunks.length; i++) {
+      const isLast = i === chunks.length - 1;
       const opts: SendMessageOptions = {
         channelId: this.channelId,
-        content: chunks[index]!,
+        content: chunks[i]!,
         flags,
       };
       if (isLast && attachments) {
         opts.attachments = attachments;
       }
-      this.delegate.sendMessage(opts).then((msg) => {
-        index++;
-        if (isLast) {
-          onAllSent?.();
-          resolvePromise(msg);
-        } else {
-          sendNext();
-        }
-      });
-    };
-    sendNext();
-    return promise;
+      const ref = this.delegate.sendMessage(opts);
+      if (!firstRef) firstRef = ref;
+      if (isLast) {
+        onAllSent?.();
+      }
+    }
+    return firstRef!;
   }
 
   private parseAttachmentTags(text: string): { cleanText: string; paths: string[] } {
