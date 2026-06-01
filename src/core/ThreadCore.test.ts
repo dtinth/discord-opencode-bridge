@@ -360,6 +360,18 @@ describe("ThreadCore", () => {
       expect(t.sentMessages[1]!.content).toBe("┣ **");
     });
 
+    test("footer too long to fit in text message is sent separately", () => {
+      const t = new ThreadCoreTester("ch_1");
+      const longText = "x".repeat(1992);
+
+      t.dispatchOpenCodeEvent(textPart(longText, "m1"));
+      t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
+
+      // ⬥ + 1992 x's = 1995 chars, + " — *gpt-4*" = 2008 > 2000
+      expect(t.sentMessages).toHaveLength(2);
+      expect(t.sentMessages[1]!.content).toBe("— *gpt-4*");
+    });
+
     test("message.updated at end finalizes tool group and sends footer", () => {
       const t = new ThreadCoreTester("ch_1");
 

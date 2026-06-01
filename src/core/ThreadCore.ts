@@ -191,15 +191,18 @@ export class ThreadCore {
       const footer = formatFooter(info);
 
       if (this.lastTextRef && footer) {
-        this.lastTextRef.edit(`⬥ ${this.lastTextCleanText} — ${footer}`);
-        this.lastTextRef = null;
-        this.lastTextCleanText = null;
-        return;
+        const fullContent = `⬥ ${this.lastTextCleanText} — ${footer}`;
+        if (fullContent.length <= DISCORD_MAX_MESSAGE_LENGTH) {
+          this.lastTextRef.edit(fullContent);
+          this.lastTextRef = null;
+          this.lastTextCleanText = null;
+          return;
+        }
       }
+
       if (this.lastTextRef && info.finish === "tool-calls") {
         this.lastTextRef = null;
         this.lastTextCleanText = null;
-        return;
       }
 
       if (footer) {
