@@ -16,11 +16,23 @@ function textPartWithAttach(text: string, filePath: string, messageID: string, i
   );
 }
 
-function toolPart(tool: string, status: string, messageID: string, id = "t1") {
+function toolPart(
+  tool: string,
+  status: string,
+  messageID: string,
+  id = "t1",
+  input?: Record<string, unknown>,
+) {
   return {
     type: "message.part.updated" as const,
     properties: {
-      part: { id, type: "tool" as const, tool, state: { status, input: {} }, messageID },
+      part: {
+        id,
+        type: "tool" as const,
+        tool,
+        state: { status, input: input ?? {} },
+        messageID,
+      },
     },
   };
 }
@@ -316,6 +328,19 @@ describe("ThreadCore", () => {
         expect(t.sentMessages).toHaveLength(2);
         expect(t.sentMessages[0]!.content).toContain("Thinking");
         expect(t.sentMessages[1]!.content).toContain("bash");
+      });
+
+      test("tool group splits into a new message when composite exceeds length limit", () => {
+        const t = new ThreadCoreTester("ch_1");
+        const longLine = "a".repeat(1990);
+
+        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1", { command: longLine }));
+        t.dispatchOpenCodeEvent(toolPart("read", "running", "m1", "t2"));
+
+        expect(t.sentMessages).toHaveLength(2);
+        expect(t.messageEdits).toHaveLength(0);
+        expect(t.sentMessages[0]!.content).toContain("bash");
+        expect(t.sentMessages[1]!.content).toBe("┣ **");
       });
 
       test("message.updated at end with open tool group finalizes it", () => {

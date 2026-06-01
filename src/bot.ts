@@ -47,25 +47,13 @@ function startEventListener(
   run();
 }
 
-const DISCORD_MAX_MESSAGE_LENGTH = 2000;
-
-function limitLength(content: string): string {
-  if (content.length <= DISCORD_MAX_MESSAGE_LENGTH) return content;
-  return content.slice(0, DISCORD_MAX_MESSAGE_LENGTH - 1) + "…";
-}
-
 class DiscordMessageRef implements MessageRef {
   private pendingContent: string | null = null;
-  private currentLength: number;
 
-  constructor(
-    private sendPromise: Promise<{ edit: (c: string) => Promise<unknown> }>,
-    initialContent: string,
-  ) {
-    this.currentLength = limitLength(initialContent).length;
+  constructor(private sendPromise: Promise<{ edit: (c: string) => Promise<unknown> }>) {
     this.sendPromise.then((msg) => {
       if (this.pendingContent !== null) {
-        const content = limitLength(this.pendingContent);
+        const content = this.pendingContent;
         this.pendingContent = null;
         msg.edit(content).catch(() => {});
       }
@@ -73,10 +61,8 @@ class DiscordMessageRef implements MessageRef {
   }
 
   edit(content: string): void {
-    const trimmed = limitLength(content);
-    this.currentLength = trimmed.length;
-    this.pendingContent = trimmed;
-    this.sendPromise = this.sendPromise.then((msg) => msg.edit(trimmed).then(() => msg));
+    this.pendingContent = content;
+    this.sendPromise = this.sendPromise.then((msg) => msg.edit(content).then(() => msg));
   }
 }
 
@@ -126,7 +112,7 @@ function coreForSession(
         }
       });
       sendPromise.then(() => opts.onSent?.()).catch((err) => log.error("discord send failed", err));
-      return new DiscordMessageRef(sendPromise, opts.content);
+      return new DiscordMessageRef(sendPromise);
     },
     fetchFile: (path, onResult) => {
       log.info(`fetching file: ${path}`);

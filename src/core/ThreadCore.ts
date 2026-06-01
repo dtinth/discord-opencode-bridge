@@ -105,6 +105,8 @@ function formatToolPart(part: {
   return `${icon} ${tool}`;
 }
 
+const DISCORD_MAX_MESSAGE_LENGTH = 2000;
+
 export class ThreadCore {
   private channelId: string;
   private delegate: ThreadCoreDelegate;
@@ -156,6 +158,16 @@ export class ThreadCore {
           this.toolRef = this.delegate.sendMessage({
             channelId: this.channelId,
             content: composite,
+            flags: 1 << 12,
+          });
+        } else if (composite.length > DISCORD_MAX_MESSAGE_LENGTH) {
+          this.toolRef = null;
+          this.toolParts.clear();
+          if (part.id) this.toolParts.set(part.id, part);
+          const fresh = this.buildToolComposite();
+          this.toolRef = this.delegate.sendMessage({
+            channelId: this.channelId,
+            content: fresh,
             flags: 1 << 12,
           });
         } else {
