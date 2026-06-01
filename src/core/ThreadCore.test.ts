@@ -427,6 +427,16 @@ describe("ThreadCore", () => {
       expect(t.messageEdits).toContain("⬥ Hello — *gpt-4*");
     });
 
+    test("footer appended even when tools arrive after last text", () => {
+      const t = new ThreadCoreTester("ch_1");
+
+      t.dispatchOpenCodeEvent(textPart("Done", "m1"));
+      t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+      t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
+
+      expect(t.messageEdits).toContain("⬥ Done — *gpt-4*");
+    });
+
     test("user message finalizes tool group", () => {
       const t = new ThreadCoreTester("ch_1");
 

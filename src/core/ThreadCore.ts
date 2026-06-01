@@ -153,7 +153,6 @@ export class ThreadCore {
         });
       } else if (part.type === "tool" && messageID) {
         if (part.state?.status === "pending") return;
-        this.flushTextRef();
         if (part.id) {
           this.toolParts.set(part.id, part);
         }
