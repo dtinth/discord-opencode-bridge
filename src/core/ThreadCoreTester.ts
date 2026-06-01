@@ -3,13 +3,27 @@ import {
   type FileFetchResult,
   type ThreadCoreDelegate,
   type OpenCodeEvent,
+  type MessageRef,
 } from "./ThreadCore";
+
+export class FakeMessageRef implements MessageRef {
+  edits: string[] = [];
+  constructor(
+    public content: string,
+    private onEdit?: (content: string) => void,
+  ) {}
+  edit(content: string): void {
+    this.edits.push(content);
+    this.onEdit?.(content);
+  }
+}
 
 export class ThreadCoreTester {
   sentMessages: Array<{
     content: string;
     attachments?: Array<{ name: string; content: Buffer }>;
   }> = [];
+  messageEdits: string[] = [];
   fileFetches: Array<{ path: string }> = [];
   private timers = new Map<string, number>();
   private fileFetchHandlers = new Map<string, (result: FileFetchResult) => void>();
@@ -18,8 +32,10 @@ export class ThreadCoreTester {
   constructor(channelId: string) {
     const delegate: ThreadCoreDelegate = {
       sendMessage: (opts) => {
+        const ref = new FakeMessageRef(opts.content, (c) => this.messageEdits.push(c));
         this.sentMessages.push({ content: opts.content, attachments: opts.attachments });
         opts.onSent?.();
+        return ref;
       },
       setTimer: (id, ms) => {
         this.timers.set(id, ms);

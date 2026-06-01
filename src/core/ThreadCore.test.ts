@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ThreadCoreTester } from "./ThreadCoreTester";
+import { ThreadCoreTester, FakeMessageRef } from "./ThreadCoreTester";
 
 function textPart(text: string, messageID: string, id = "p1") {
   return {
@@ -75,22 +75,13 @@ describe("ThreadCore", () => {
     });
   });
 
-  test("step-finish flushes completed tool that was not announced as running", () => {
+  test("completed tool is sent immediately as tool group (no step-finish needed)", () => {
     const t = new ThreadCoreTester("ch_1");
 
     t.dispatchOpenCodeEvent(toolPart("bash", "completed", "m1", "t1"));
-    expect(t.sentMessages).toEqual([]);
 
-    t.dispatchOpenCodeEvent({
-      type: "message.part.updated",
-      properties: {
-        part: { id: "sf1", type: "step-finish", reason: "stop", messageID: "m1" },
-      },
-    });
-
-    expect(t.sentMessages).toContainEqual({
-      content: expect.stringContaining("bash"),
-    });
+    expect(t.sentMessages).toHaveLength(1);
+    expect(t.sentMessages[0]!.content).toContain("bash");
   });
 
   test("completed tool skipped if running was already announced", () => {
@@ -271,6 +262,72 @@ describe("ThreadCore", () => {
       expect(attachMsgs).toHaveLength(2);
       expect(attachMsgs[0]!.attachments).toHaveLength(10);
       expect(attachMsgs[1]!.attachments).toHaveLength(1);
+    });
+
+    describe("tool grouping", () => {
+      test("first tool in a group sends a new message", () => {
+        const t = new ThreadCoreTester("ch_1");
+
+        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+
+        expect(t.sentMessages).toHaveLength(1);
+        expect(t.sentMessages[0]!.content).toContain("bash");
+      });
+
+      test("second tool in same group edits the first message", () => {
+        const t = new ThreadCoreTester("ch_1");
+
+        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+        t.dispatchOpenCodeEvent(toolPart("read", "running", "m1", "t2"));
+
+        expect(t.sentMessages).toHaveLength(1);
+        expect(t.messageEdits).toHaveLength(1);
+        expect(t.messageEdits[0]).toBe("┣ bash\n┣ **");
+      });
+
+      test("tool completed updates the line in the composite", () => {
+        const t = new ThreadCoreTester("ch_1");
+
+        t.dispatchOpenCodeEvent(toolPart("read", "running", "m1", "t1"));
+        t.dispatchOpenCodeEvent(toolPart("read", "completed", "m1", "t1"));
+
+        expect(t.sentMessages).toHaveLength(1);
+        expect(t.messageEdits).toHaveLength(1);
+      });
+
+      test("text after tools finalizes the tool group and sends text separately", () => {
+        const t = new ThreadCoreTester("ch_1");
+
+        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+        t.dispatchOpenCodeEvent(textPart("Response", "m2"));
+        t.advanceTime();
+
+        expect(t.sentMessages).toHaveLength(2);
+        expect(t.sentMessages[0]!.content).toContain("bash");
+        expect(t.sentMessages[1]!.content).toContain("⬥ Response");
+      });
+
+      test("tools after text flush deferred text then start tool group", () => {
+        const t = new ThreadCoreTester("ch_1");
+
+        t.dispatchOpenCodeEvent(textPart("Thinking", "m1"));
+        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+
+        expect(t.sentMessages).toHaveLength(2);
+        expect(t.sentMessages[0]!.content).toContain("Thinking");
+        expect(t.sentMessages[1]!.content).toContain("bash");
+      });
+
+      test("message.updated at end with open tool group finalizes it", () => {
+        const t = new ThreadCoreTester("ch_1");
+
+        t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+        t.dispatchOpenCodeEvent(messageUpdated("m1", "gpt-4", "stop", 200));
+
+        expect(t.messageEdits.length).toBeGreaterThanOrEqual(1);
+        expect(t.sentMessages).toHaveLength(2);
+        expect(t.sentMessages[1]!.content).toBe("— *gpt-4*");
+      });
     });
 
     test("exactly 10 files sent in single message", () => {

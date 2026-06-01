@@ -10,15 +10,20 @@ export type FileFetchResult =
   | { ok: true; file: FileAttachment }
   | { ok: false; path: string; error: string };
 
+export interface MessageRef {
+  edit(content: string): void;
+}
+
 export interface SendMessageOptions {
   channelId: string;
   content: string;
   attachments?: FileAttachment[];
   onSent?: () => void;
+  flags?: number;
 }
 
 export interface ThreadCoreDelegate {
-  sendMessage(options: SendMessageOptions): void;
+  sendMessage(options: SendMessageOptions): MessageRef;
   setTimer(timerId: string, ms: number): void;
   clearTimer(timerId: string): void;
   showTyping(): void;
@@ -104,56 +109,31 @@ export class ThreadCore {
   private channelId: string;
   private delegate: ThreadCoreDelegate;
   private deferredTexts = new Map<string, { text: string }>();
-  private announcedToolParts = new Set<string>();
-  private sentRunningToolPartIds = new Set<string>();
-  private partBuffer = new Map<string, Map<string, Part>>();
+  private toolRef: MessageRef | null = null;
+  private toolParts = new Map<string, Part>();
 
   constructor(channelId: string, delegate: ThreadCoreDelegate) {
     this.channelId = channelId;
     this.delegate = delegate;
   }
 
-  private storeBufferedPart(messageID: string, part: Part): void {
-    if (!part.id) return;
-    let messageParts = this.partBuffer.get(messageID);
-    if (!messageParts) {
-      messageParts = new Map();
-      this.partBuffer.set(messageID, messageParts);
-    }
-    messageParts.set(part.id, part);
-  }
-
-  private shouldSendPart(part: Part, force: boolean): boolean {
-    if (part.type === "step-start" || part.type === "step-finish") return false;
-    if (part.type === "tool" && part.state?.status === "pending") return false;
-    if (!force && part.type === "text" && !part.time?.end) return false;
-    if (!force && part.type === "tool" && part.state?.status === "completed") return false;
-    return true;
-  }
-
-  private flushBufferedParts(messageID: string, force: boolean): void {
-    const messageParts = this.partBuffer.get(messageID);
-    if (!messageParts) return;
-
-    const toDelete: string[] = [];
-    for (const [partId, part] of messageParts) {
-      if (!this.shouldSendPart(part, force)) continue;
-      if (part.type === "tool") {
-        if (part.state?.status === "completed" && this.sentRunningToolPartIds.has(partId)) {
-          this.sentRunningToolPartIds.delete(partId);
-          toDelete.push(partId);
-          continue;
-        }
-        this.sendContent(formatToolPart(part));
-      }
-      toDelete.push(partId);
-    }
-    for (const id of toDelete) messageParts.delete(id);
-    if (messageParts.size === 0) this.partBuffer.delete(messageID);
-  }
-
   private flushDeferredText(messageID: string): void {
     this.sendDeferredWithAttachments(messageID);
+  }
+
+  private buildToolComposite(): string {
+    return [...this.toolParts.values()]
+      .filter((p) => p.state?.status !== "pending")
+      .map(formatToolPart)
+      .join("\n");
+  }
+
+  private finalizeToolGroup(): void {
+    if (!this.toolRef) return;
+    const composite = this.buildToolComposite();
+    this.toolRef.edit(composite);
+    this.toolRef = null;
+    this.toolParts.clear();
   }
 
   handleOpenCodeEvent(event: OpenCodeEvent): void {
@@ -161,29 +141,31 @@ export class ThreadCore {
     if (event.type === "message.part.updated" && part) {
       const messageID = part.messageID;
       if (part.type === "text" && part.time?.end && part.text?.trim() && messageID) {
+        this.finalizeToolGroup();
         this.flushDeferredText(messageID);
         this.delegate.setTimer(messageID, 200);
         this.deferredTexts.set(messageID, { text: part.text.trim() });
-      } else if (part.type === "tool" && part.state?.status === "running" && messageID) {
+      } else if (part.type === "tool" && messageID) {
+        if (part.state?.status === "pending") return;
         this.flushDeferredText(messageID);
-        if (part.id && !this.announcedToolParts.has(part.id)) {
-          this.announcedToolParts.add(part.id);
-          this.sentRunningToolPartIds.add(part.id);
-          this.sendContent(formatToolPart(part));
+        if (part.id) {
+          this.toolParts.set(part.id, part);
         }
-      } else if (
-        part.type === "tool" &&
-        part.state?.status === "completed" &&
-        messageID &&
-        part.id
-      ) {
-        this.storeBufferedPart(messageID, part);
-      } else if (part.type === "step-finish" && messageID) {
-        this.flushBufferedParts(messageID, true);
+        const composite = this.buildToolComposite();
+        if (!this.toolRef) {
+          this.toolRef = this.delegate.sendMessage({
+            channelId: this.channelId,
+            content: composite,
+            flags: 1 << 12,
+          });
+        } else {
+          this.toolRef.edit(composite);
+        }
       } else {
         this.delegate.showTyping();
       }
     } else if (event.type === "message.updated") {
+      this.finalizeToolGroup();
       const props = event.properties as Record<string, unknown> | undefined;
       const info = props?.info as Record<string, unknown> | undefined;
       if (!info) return;
@@ -246,9 +228,10 @@ export class ThreadCore {
     content: string,
     attachments?: FileAttachment[],
     onAllSent?: () => void,
+    flags?: number,
   ): void {
     const chunks = splitContent(content);
-    this.sendChunks(chunks, 0, attachments, onAllSent);
+    this.sendChunks(chunks, 0, attachments, onAllSent, flags);
   }
 
   private sendChunks(
@@ -256,6 +239,7 @@ export class ThreadCore {
     index: number,
     attachments?: FileAttachment[],
     onAllSent?: () => void,
+    flags?: number,
   ): void {
     if (index >= chunks.length) {
       onAllSent?.();
@@ -266,11 +250,12 @@ export class ThreadCore {
     const opts: SendMessageOptions = {
       channelId: this.channelId,
       content: chunk,
+      flags,
     };
     if (isLast && attachments) {
       opts.attachments = attachments;
     }
-    opts.onSent = () => this.sendChunks(chunks, index + 1, attachments, onAllSent);
+    opts.onSent = () => this.sendChunks(chunks, index + 1, attachments, onAllSent, flags);
     this.delegate.sendMessage(opts);
   }
 
