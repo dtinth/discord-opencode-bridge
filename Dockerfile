@@ -8,4 +8,4 @@ FROM oven/bun:1
 WORKDIR /app
 COPY --from=build /app /app
 ENV DATABASE_PATH=/data/bridge.db
-CMD ["bun", "run", "src/index.ts"]
+CMD ["bun", "bot", "run"]
