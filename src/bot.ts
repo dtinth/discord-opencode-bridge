@@ -57,7 +57,7 @@ class DiscordMessageRef implements MessageRef {
   private lastContent = "";
 
   constructor(
-    private doSend: () => Promise<{ edit: (c: string) => Promise<unknown> }>,
+    private doSend: (content: string) => Promise<{ edit: (c: string) => Promise<unknown> }>,
     private onSent?: () => void,
     content?: string,
   ) {
@@ -75,7 +75,7 @@ class DiscordMessageRef implements MessageRef {
       this.resolved = true;
       const content = this.pendingContent ?? "";
       this.pendingContent = null;
-      this.sentMessage = this.doSend()
+      this.sentMessage = this.doSend(content)
         .then((msg) => {
           this.onSent?.();
           return msg;
@@ -126,10 +126,10 @@ function coreForSession(
           ? ` (${opts.attachments.length} file(s))`
           : "";
       log.info(`sending to discord:${fileInfo} ${(opts.content ?? "").slice(0, 120)}`);
-      const doSend = () =>
+      const doSend = (sendContent: string) =>
         client.channels.fetch(threadId).then((ch) => {
           if (ch?.isTextBased() && ch.isSendable()) {
-            const sendOpts: Record<string, unknown> = { content: opts.content ?? "" };
+            const sendOpts: Record<string, unknown> = { content: sendContent };
             if (opts.attachments && opts.attachments.length > 0) {
               sendOpts.files = opts.attachments.map((a) => ({
                 attachment: a.content,
