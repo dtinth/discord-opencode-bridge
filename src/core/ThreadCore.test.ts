@@ -403,16 +403,18 @@ describe("ThreadCore", () => {
       expect(t.messageEdits[0]!.split("\n")).toHaveLength(2);
     });
 
-    test("text does not finalize tool group", () => {
+    test("text between tools ends the current tool group", () => {
       const t = new ThreadCoreTester("ch_1");
 
       t.dispatchOpenCodeEvent(toolPart("bash", "running", "m1", "t1"));
+      t.dispatchOpenCodeEvent(toolPart("read", "running", "m1", "t2"));
       t.dispatchOpenCodeEvent(textPart("response", "m2"));
-      t.dispatchOpenCodeEvent(toolPart("read", "running", "m3", "t2"));
+      t.dispatchOpenCodeEvent(toolPart("bash", "running", "m3", "t3"));
 
-      expect(t.sentMessages).toHaveLength(2);
+      expect(t.sentMessages).toHaveLength(3);
       expect(t.sentMessages[0]!.content).toContain("bash");
       expect(t.sentMessages[1]!.content).toContain("response");
+      expect(t.sentMessages[2]!.content).toContain("bash");
       expect(t.messageEdits).toHaveLength(1);
       expect(t.messageEdits[0]!.split("\n")).toHaveLength(2);
     });

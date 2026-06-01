@@ -130,6 +130,8 @@ export class ThreadCore {
     if (event.type === "message.part.updated" && part) {
       const messageID = part.messageID;
       if (part.type === "text" && part.time?.end && part.text?.trim() && messageID) {
+        this.toolRef = null;
+        this.toolParts.clear();
         const { cleanText, paths } = this.parseAttachmentTags(part.text.trim());
         const content = `⬥ ${cleanText}`;
         this.lastTextCleanText = cleanText;
