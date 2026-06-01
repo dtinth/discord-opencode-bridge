@@ -1,0 +1,12 @@
+services:
+  bridge:
+    build: .
+    restart: unless-stopped
+    env:
+      DISCORD_TOKEN: "${DISCORD_TOKEN}"
+      DATABASE_PATH: /data/bridge.db
+    volumes:
+      - bridge_data:/data
+
+volumes:
+  bridge_data:
