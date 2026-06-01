@@ -54,13 +54,17 @@ class DiscordMessageRef implements MessageRef {
   private resolved = false;
   private bufferTimer: ReturnType<typeof setTimeout> | null = null;
   private sentMessage: Promise<{ edit: (c: string) => Promise<unknown> } | null> | null = null;
+  private lastContent = "";
 
   constructor(
     private doSend: () => Promise<{ edit: (c: string) => Promise<unknown> }>,
     private onSent?: () => void,
     content?: string,
   ) {
-    if (content) this.pendingContent = content;
+    if (content) {
+      this.pendingContent = content;
+      this.lastContent = content;
+    }
     this.scheduleSend();
   }
 
@@ -77,6 +81,7 @@ class DiscordMessageRef implements MessageRef {
     if (this.resolved) return;
     this.resolved = true;
     const content = this.pendingContent ?? "";
+    this.lastContent = content;
     this.pendingContent = null;
     this.sentMessage = this.doSend()
       .then((msg) => {
@@ -90,11 +95,18 @@ class DiscordMessageRef implements MessageRef {
   }
 
   edit(content: string): void {
+    if (content === this.lastContent) return;
+    this.lastContent = content;
     if (this.resolved) {
-      this.pendingContent = content;
-      (this.sentMessage ?? Promise.resolve(null)).then((msg) => {
-        if (msg) msg.edit(content).catch(() => {});
-      });
+      this.sentMessage = (this.sentMessage ?? Promise.resolve(null))
+        .then((msg) => {
+          if (msg) return msg.edit(content).then(() => msg);
+          return null as never;
+        })
+        .catch((err) => {
+          log.error("discord edit failed", err);
+          return null;
+        });
     } else {
       this.pendingContent = content;
     }
